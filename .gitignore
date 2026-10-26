@@ -1,0 +1,14 @@
+# data (lives in R2, not git)
+*.db
+app/banned_shops.json
+# runtime state / outputs
+__pycache__/
+logs/
+staging/
+r2_local/
+runner.lock
+archive_state.json
+snapshot_*.json
+ranking_weekly_*.json
+*.bak-*
+venv/
