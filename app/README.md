@@ -38,9 +38,11 @@ python3 -m venv venv
 ./venv/bin/pip install requests beautifulsoup4 boto3
 ```
 
-R2 を使う場合は環境変数を設定する（未設定なら `r2_local/` へのローカルミラーで全フローが動く）:
+保存先は `storage.json`（VM 側、リポジトリには含めない）で切り替える:
 
-- `ESTAMA_R2_ENDPOINT` / `ESTAMA_R2_BUCKET` / `ESTAMA_R2_ACCESS_KEY_ID` / `ESTAMA_R2_SECRET_ACCESS_KEY`
+- `{"backend": "github", "repo": "yamahei21python/estama-tracker", "branch": "data"}` — GitHub の `data` ブランチにファイルとして保存（DB は gzip 圧縮、検証は blob SHA 照合）。**現在の暫定運用**（2026-10-26〜、R2 移行までの間）。認証は GitHub コネクタ経由で、VM にトークンは置かない
+- R2 を使う場合は代わりに環境変数を設定する: `ESTAMA_R2_ENDPOINT` / `ESTAMA_R2_BUCKET` / `ESTAMA_R2_ACCESS_KEY_ID` / `ESTAMA_R2_SECRET_ACCESS_KEY`
+- どちらも無ければ `r2_local/` へのローカルミラーで全フローが動く
 
 ## 手動実行
 

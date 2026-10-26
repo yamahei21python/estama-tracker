@@ -15,10 +15,13 @@ Wraps the scrapers with the operational safeguards agreed 2026-10-26:
    than the expected current business date, the finished business day is
    archived to `archive/estama-<business-date>.db` exactly once.
 
-Storage backend: Cloudflare R2 via boto3 when ESTAMA_R2_* env vars are set;
-otherwise a local mirror directory (BASE/r2_local/) so the whole pipeline is
-testable before the bucket/token exist. Behaviour (staging -> verify ->
-promote) is identical in both modes.
+Storage backends (staging -> verify -> promote semantics everywhere):
+- GitHub: when BASE/storage.json says {"backend": "github", ...}, objects are
+  stored as files on a dedicated `data` branch of the code repo (DB files
+  gzip-compressed). Interim backend until the R2 migration; auth rides the
+  custom.github-cli connector surrogate, so no token sits on this VM.
+- Cloudflare R2 via boto3 when ESTAMA_R2_* env vars are set.
+- Otherwise a local mirror directory (BASE/r2_local/).
 
 Usage:
     runner.py checkpoint    # scrape all shops (today only) + verify + upload
@@ -27,13 +30,17 @@ Usage:
 
 from __future__ import annotations
 
+import base64
 import fcntl
+import gzip
+import hashlib
 import json
 import os
 import shutil
 import sqlite3
 import subprocess
 import sys
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -89,8 +96,147 @@ def _s3():
     )
 
 
-def storage_put(key: str, local_file: Path) -> None:
+STORAGE_CONFIG = BASE / "storage.json"
+
+
+def storage_config() -> dict:
+    if STORAGE_CONFIG.exists():
+        return json.loads(STORAGE_CONFIG.read_text())
+    return {}
+
+
+def backend_name() -> str:
+    if storage_config().get("backend") == "github":
+        return "github"
     if r2_configured():
+        return "R2"
+    return "local-mirror"
+
+
+# ------------------------------------------------------- GitHub backend ----
+# Objects live as files on the `data` branch of the code repo. DB payloads
+# are gzip-compressed (deterministic, mtime=0) so blob SHAs are reproducible:
+# verification compares the remote blob SHA against the locally computed
+# git blob SHA of the (compressed) bytes - stronger than a size check.
+# Auth: the custom.github-cli connector surrogate, swapped for the real PAT
+# on egress to api.github.com (same mechanics as the connector helper).
+
+GH_CONNECTOR = "custom.github-cli"
+GH_API = "https://api.github.com"
+GH_CRED_LIB = "/opt/muse/skills/custom-connector-setup/bin"
+
+
+def gh_path(key: str) -> str:
+    if key.endswith(".db") or key.endswith(".db.staging"):
+        return key + ".gz"
+    return key
+
+
+def gh_blob_sha(data: bytes) -> str:
+    return hashlib.sha1(
+        b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+
+
+def gh_payload(local_file: Path, key: str) -> bytes:
+    data = local_file.read_bytes()
+    if gh_path(key) != key:
+        data = gzip.compress(data, mtime=0)
+    return data
+
+
+def _gh_api(method: str, path: str, body: dict | None = None,
+            timeout: int = 180) -> dict:
+    sys.path.insert(0, GH_CRED_LIB)
+    from dynamic_credentials import add_surrogate_to_request
+
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(GH_API + path, data=data, method=method)
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("X-GitHub-Api-Version", "2022-11-28")
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    add_surrogate_to_request(req, GH_CONNECTOR, allowed_hosts=["api.github.com"])
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    return json.loads(raw) if raw else {}
+
+
+def _gh_repo_branch() -> tuple[str, str]:
+    cfg = storage_config()
+    return cfg.get("repo", "yamahei21python/estama-tracker"), cfg.get("branch", "data")
+
+
+def _gh_head() -> tuple[str, str]:
+    repo, branch = _gh_repo_branch()
+    ref = _gh_api("GET", f"/repos/{repo}/git/ref/heads/{branch}")
+    commit_sha = ref["object"]["sha"]
+    commit = _gh_api("GET", f"/repos/{repo}/git/commits/{commit_sha}")
+    return commit_sha, commit["tree"]["sha"]
+
+
+def _gh_entries() -> dict:
+    """path -> tree entry for every blob on the data branch."""
+    repo, _ = _gh_repo_branch()
+    _, tree_sha = _gh_head()
+    out = _gh_api("GET", f"/repos/{repo}/git/trees/{tree_sha}?recursive=1")
+    return {e["path"]: e for e in out.get("tree", []) if e["type"] == "blob"}
+
+
+def _gh_commit(entries: list[dict], message: str) -> None:
+    repo, branch = _gh_repo_branch()
+    head_sha, tree_sha = _gh_head()
+    tree = _gh_api("POST", f"/repos/{repo}/git/trees",
+                   {"base_tree": tree_sha, "tree": entries})
+    commit = _gh_api("POST", f"/repos/{repo}/git/commits",
+                     {"message": message, "tree": tree["sha"],
+                      "parents": [head_sha]})
+    _gh_api("PATCH", f"/repos/{repo}/git/refs/heads/{branch}",
+            {"sha": commit["sha"]})
+
+
+def _gh_put(key: str, local_file: Path) -> None:
+    repo, _ = _gh_repo_branch()
+    data = gh_payload(local_file, key)
+    blob = _gh_api("POST", f"/repos/{repo}/git/blobs",
+                   {"content": base64.b64encode(data).decode(),
+                    "encoding": "base64"})
+    if blob["sha"] != gh_blob_sha(data):
+        raise IOError(f"github blob sha mismatch for {key}")
+    _gh_commit([{"path": gh_path(key), "mode": "100644", "type": "blob",
+                 "sha": blob["sha"]}], f"data: update {key}")
+
+
+def _gh_size(key: str) -> int | None:
+    entry = _gh_entries().get(gh_path(key))
+    return int(entry["size"]) if entry else None
+
+
+def _gh_verify(key: str, local_file: Path) -> bool:
+    entry = _gh_entries().get(gh_path(key))
+    return bool(entry) and entry["sha"] == gh_blob_sha(gh_payload(local_file, key))
+
+
+def _gh_copy(src_key: str, dst_key: str) -> None:
+    entries = _gh_entries()
+    src = entries.get(gh_path(src_key))
+    if not src:
+        raise IOError(f"github copy source missing: {src_key}")
+    _gh_commit([{"path": gh_path(dst_key), "mode": "100644", "type": "blob",
+                 "sha": src["sha"]}], f"data: copy {src_key} -> {dst_key}")
+
+
+def _gh_delete(key: str) -> None:
+    _gh_commit([{"path": gh_path(key), "mode": "100644", "type": "blob",
+                 "sha": None}], f"data: delete {key}")
+
+
+# ------------------------------------------------------------ dispatch -----
+
+def storage_put(key: str, local_file: Path) -> None:
+    b = backend_name()
+    if b == "github":
+        _gh_put(key, local_file)
+    elif b == "R2":
         _s3().upload_file(str(local_file), os.environ["ESTAMA_R2_BUCKET"], key)
     else:
         dest = LOCAL_MIRROR / key
@@ -99,7 +245,13 @@ def storage_put(key: str, local_file: Path) -> None:
 
 
 def storage_size(key: str) -> int | None:
-    if r2_configured():
+    b = backend_name()
+    if b == "github":
+        try:
+            return _gh_size(key)
+        except Exception:
+            return None
+    if b == "R2":
         try:
             head = _s3().head_object(Bucket=os.environ["ESTAMA_R2_BUCKET"], Key=key)
             return int(head["ContentLength"])
@@ -109,8 +261,21 @@ def storage_size(key: str) -> int | None:
     return p.stat().st_size if p.exists() else None
 
 
+def storage_verify(key: str, local_file: Path) -> bool:
+    """True when the stored object provably matches the local file."""
+    if backend_name() == "github":
+        try:
+            return _gh_verify(key, local_file)
+        except Exception:
+            return False
+    return storage_size(key) == local_file.stat().st_size
+
+
 def storage_copy(src_key: str, dst_key: str) -> None:
-    if r2_configured():
+    b = backend_name()
+    if b == "github":
+        _gh_copy(src_key, dst_key)
+    elif b == "R2":
         bucket = os.environ["ESTAMA_R2_BUCKET"]
         _s3().copy_object(Bucket=bucket, CopySource={"Bucket": bucket, "Key": src_key}, Key=dst_key)
     else:
@@ -120,7 +285,10 @@ def storage_copy(src_key: str, dst_key: str) -> None:
 
 
 def storage_delete(key: str) -> None:
-    if r2_configured():
+    b = backend_name()
+    if b == "github":
+        _gh_delete(key)
+    elif b == "R2":
         _s3().delete_object(Bucket=os.environ["ESTAMA_R2_BUCKET"], Key=key)
     else:
         (LOCAL_MIRROR / key).unlink(missing_ok=True)
@@ -191,15 +359,14 @@ def upload_db() -> dict:
     verify_db(snap)  # the copy itself must be intact before it can go live
     size = snap.stat().st_size
     storage_put(STAGING_KEY, snap)
-    remote = storage_size(STAGING_KEY)
-    if remote != size:
-        raise IOError(f"staged upload size mismatch: local {size} vs remote {remote}")
+    if not storage_verify(STAGING_KEY, snap):
+        raise IOError("staged upload verification failed")
     storage_copy(STAGING_KEY, LIVE_KEY)
-    if storage_size(LIVE_KEY) != size:
-        raise IOError("promoted object size mismatch")
+    if not storage_verify(LIVE_KEY, snap):
+        raise IOError("promoted object verification failed")
     storage_delete(STAGING_KEY)
     snap.unlink(missing_ok=True)
-    log(f"upload ok: {LIVE_KEY} {size} bytes, stats={stats}, backend={'R2' if r2_configured() else 'local-mirror'}")
+    log(f"upload ok: {LIVE_KEY} {size} bytes, stats={stats}, backend={backend_name()}")
     return stats
 
 
@@ -226,8 +393,8 @@ def maybe_archive(now: datetime) -> str | None:
         snapshot_copy(DB, snap)
         verify_db(snap)
         storage_put(key, snap)
-        if storage_size(key) != snap.stat().st_size:
-            raise IOError(f"archive upload size mismatch for {key}")
+        if not storage_verify(key, snap):
+            raise IOError(f"archive upload verification failed for {key}")
         snap.unlink(missing_ok=True)
     state["last_archived"] = bd
     STATE_FILE.write_text(json.dumps(state))
