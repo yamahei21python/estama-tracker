@@ -23,7 +23,24 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+JST = ZoneInfo("Asia/Tokyo")
+
+
+def now_jst() -> datetime:
+    """Current time in Asia/Tokyo.
+
+    Every timestamp stored in the DB (fetched_at / fetched_time /
+    fetched_date) must come from here, never from a naive
+    datetime.now(): the VM clock is UTC, and naive stamps silently
+    stored UTC values under a 'JST' label until 2026-10-26 (and a
+    naive fetched_date could be a day behind in the early JST
+    morning, e.g. the 06:15 ranking run).
+    """
+    return datetime.now(JST)
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "estama.db"

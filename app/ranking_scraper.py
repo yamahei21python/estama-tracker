@@ -29,7 +29,7 @@ except ImportError:
 
 from common import (BASE_DIR, DB_PATH as DEFAULT_DB, SCHEMA_PATH,
                     SHOPS_JSON_PATH as DEFAULT_SHOPS_JSON, connect_db,
-                    load_json, make_session, save_json)
+                    load_json, make_session, now_jst, save_json)
 
 # Osaka Area Definitions on estama.jp
 OSAKA_AREAS = {
@@ -150,8 +150,8 @@ class RankingScraper:
             "area_name": area_name,
             "period": period,
             "url": url,
-            "fetched_date": datetime.now().strftime("%Y-%m-%d"),
-            "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S JST"),
+            "fetched_date": now_jst().strftime("%Y-%m-%d"),
+            "fetched_at": now_jst().strftime("%Y-%m-%d %H:%M:%S JST"),
             "count": len(results),
             "rankings": results
         }

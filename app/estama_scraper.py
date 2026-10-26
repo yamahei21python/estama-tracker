@@ -36,7 +36,8 @@ except ImportError:
 
 from common import (BASE_DIR, DB_PATH as DEFAULT_DB, SCHEMA_PATH,
                     SHOPS_JSON_PATH as DEFAULT_SHOPS_JSON, connect_db,
-                    load_json, make_session, normalize_status_text, save_json)
+                    load_json, make_session, normalize_status_text, now_jst,
+                    save_json)
 
 DEFAULT_SHOP_ID = 40900  # 梅田高級メンズエステ SUPER AKUMA GIRLS
 
@@ -209,7 +210,7 @@ class EstamaScraper:
             self.init_session()
 
         if now_dt is None:
-            now_dt = datetime.now()
+            now_dt = now_jst()
 
         if base_date is not None:
             target_date = (datetime.strptime(base_date, "%Y-%m-%d") + timedelta(days=days_offset)).strftime("%Y-%m-%d")
@@ -428,7 +429,7 @@ class EstamaScraper:
         """Fetch schedule days starting today. Default is today only:
         future days carry no real status (templated text, no sold_out)."""
         self.init_session()
-        now_dt = datetime.now()
+        now_dt = now_jst()
         fetched_at = now_dt.strftime("%Y-%m-%d %H:%M:%S JST")
         fetched_time = now_dt.strftime("%H:%M")
 
@@ -565,7 +566,7 @@ def import_into_db(data, db_path=DEFAULT_DB):
     )
 
     total_inserted = 0
-    fetched_time = data.get("fetched_time", datetime.now().strftime("%H:%M"))
+    fetched_time = data.get("fetched_time", now_jst().strftime("%H:%M"))
     for day_info in data["days"]:
         target_date = day_info["target_date"]
         for c in day_info["casts"]:
@@ -605,7 +606,7 @@ def import_into_db(data, db_path=DEFAULT_DB):
 def show_speed_ranking(date_str=None, db_path=DEFAULT_DB, shop_id=DEFAULT_SHOP_ID):
     """Analyze and display which casts sold out earliest on a given date."""
     if date_str is None:
-        date_str = datetime.now().strftime("%Y-%m-%d")
+        date_str = now_jst().strftime("%Y-%m-%d")
 
     conn = connect_db(db_path, apply_schema=False)
     cur = conn.cursor()
