@@ -1,7 +1,7 @@
 -- estama-tracker schema (SQLite)
 -- Purpose: track sold-out casts on Estama (estama.jp), Osaka watchlist.
--- Supports time-series snapshots (e.g. 12 daily checkpoints: 00:30, 03:00, 05:00, 07:00, 09:00,
--- 11:00, 13:00, 15:00, 17:00, 19:00, 21:00, 23:00) to analyze sold-out speed and work hours.
+-- Supports time-series snapshots (hourly checkpoints at :30, 24 per day)
+-- to analyze sold-out speed and work hours.
 
 CREATE TABLE IF NOT EXISTS shops (
     shop_id      INTEGER PRIMARY KEY,

@@ -40,11 +40,10 @@ DEFAULT_DB = BASE_DIR / "estama.db"
 SCHEMA_PATH = BASE_DIR / "schema.sql"
 DEFAULT_SHOPS_JSON = BASE_DIR / "shops.json"
 
-# Recommended 12 execution checkpoints per day
-RECOMMENDED_CHECKPOINTS = [
-    "00:30", "03:00", "05:00", "07:00", "09:00", "11:00",
-    "13:00", "15:00", "17:00", "19:00", "21:00", "23:00"
-]
+# Recommended execution checkpoints: hourly at :30 (24 per day).
+# A full 74-shop run takes ~5 min, so hourly fits and doubles the
+# sold-out-speed resolution vs. the old every-2-hours plan.
+RECOMMENDED_CHECKPOINTS = [f"{h:02d}:30" for h in range(24)]
 
 # ANSI Colors for terminal output
 COLOR_RED = "\033[91m"
@@ -721,20 +720,23 @@ def show_speed_ranking(date_str=None, db_path=DEFAULT_DB, shop_id=DEFAULT_SHOP_I
 def print_cron_guide():
     """Print cron schedule instructions for user."""
     print("\n" + "=" * 75)
-    print(f"{COLOR_BOLD}⏰ 推奨実行スケジュール（1日12回・約2時間おき）{COLOR_RESET}")
+    print(f"{COLOR_BOLD}⏰ 推奨実行スケジュール（1日24回・1時間おき、毎時30分）{COLOR_RESET}")
     print("=" * 75)
     print("実行時刻の目安:")
     for cp in RECOMMENDED_CHECKPOINTS:
         print(f"  - {cp} JST")
 
     print("\n【理由】: 朝早く売り切れるキャストほど超人気！何時に売り切れたかを追跡可能。")
-    print("\n【crontab 設定例】(crontab -e で貼り付け):")
+    print("\n【本番の実行方法】スケジュール実行は runner.py 経由が前提:")
+    print("  runner.py がロック・整合性チェック・R2アップロード・営業日アーカイブを担当する。")
+    runner_path = BASE_DIR.parent / "runner.py"
+    print(f"{COLOR_CYAN}# チェックポイント（毎時30分）{COLOR_RESET}")
+    print(f"30 * * * * python3 {runner_path} checkpoint")
+    print(f"{COLOR_CYAN}# ランキング＋ウォッチリスト同期＋出禁判定（毎日 06:15）{COLOR_RESET}")
+    print(f"15 6 * * * python3 {runner_path} ranking")
+    print("\n【直接実行する場合】(手動・検証用):")
     script_path = BASE_DIR / "estama_scraper.py"
-    cmd_example = f"python3 {script_path} --all-shops --days 1 --import-db > /tmp/estama_scrape.log 2>&1"
-    print(f"{COLOR_CYAN}# 00:30 に実行{COLOR_RESET}")
-    print(f"30 0 * * * {cmd_example}")
-    print(f"{COLOR_CYAN}# 03:00, 05:00, 07:00, 09:00, 11:00, 13:00, 15:00, 17:00, 19:00, 21:00, 23:00 に実行{COLOR_RESET}")
-    print(f"0 3,5,7,9,11,13,15,17,19,21,23 * * * {cmd_example}")
+    print(f"python3 {script_path} --all-shops --days 1 --import-db")
     print("=" * 75 + "\n")
 
 
@@ -750,7 +752,7 @@ def load_shops_json(shops_json_path=DEFAULT_SHOPS_JSON):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Scrape and analyze estama.jp schedule & track sold-out speed across 12 daily checkpoints."
+        description="Scrape and analyze estama.jp schedule & track sold-out speed across hourly checkpoints."
     )
     parser.add_argument("--shop-id", type=int, default=DEFAULT_SHOP_ID, help=f"Shop ID (default: {DEFAULT_SHOP_ID})")
     parser.add_argument("--shop-url", type=str, help="Full shop schedule URL (overrides --shop-id)")
@@ -763,7 +765,7 @@ def main():
     parser.add_argument("--json", action="store_true", help="Output full JSON instead of formatted report")
     parser.add_argument("--speed-rank", action="store_true", help="Show sold-out speed ranking and timeline for today")
     parser.add_argument("--date", type=str, help="Target date for --speed-rank (YYYY-MM-DD)")
-    parser.add_argument("--cron-guide", action="store_true", help="Display crontab schedule guide for the 12 daily checkpoints")
+    parser.add_argument("--cron-guide", action="store_true", help="Display the recommended schedule (hourly checkpoints via runner.py)")
 
     args = parser.parse_args()
 
