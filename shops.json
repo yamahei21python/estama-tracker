@@ -1,0 +1,471 @@
+{
+  "note": "Final watchlist: 20 Osaka shops with the most reviews (口コミ件数順), collected 2026-10-26 16:18-16:22 JST. Fixed list — do not re-derive top 20 each run.",
+  "shops": [
+    {
+      "area": "京橋",
+      "name": "古都 別邸",
+      "review_count": 1563,
+      "shop_id": 34532,
+      "source_url": "https://estama.jp/shop/34532/schedule/"
+    },
+    {
+      "area": "堺筋本町",
+      "name": "sirena~シレーナ~",
+      "review_count": 641,
+      "shop_id": 38188,
+      "source_url": "https://estama.jp/shop/38188/schedule/"
+    },
+    {
+      "area": "日本橋",
+      "name": "Mrsジョリエ大阪",
+      "review_count": 628,
+      "shop_id": 29117,
+      "source_url": "https://estama.jp/shop/29117/schedule/"
+    },
+    {
+      "area": "難波",
+      "name": "Flower",
+      "review_count": 598,
+      "shop_id": 42071,
+      "source_url": "https://estama.jp/shop/42071/schedule/"
+    },
+    {
+      "area": "大阪駅",
+      "name": "Cheri（派遣・出張専門店）",
+      "review_count": 595,
+      "shop_id": 41994,
+      "source_url": "https://estama.jp/shop/41994/schedule/"
+    },
+    {
+      "area": "梅田",
+      "name": "Cheri梅田/京橋（ルーム）",
+      "review_count": 585,
+      "shop_id": 42034,
+      "source_url": "https://estama.jp/shop/42034/schedule/"
+    },
+    {
+      "area": "新大阪",
+      "name": "Guy Osaka",
+      "review_count": 581,
+      "shop_id": 42020,
+      "source_url": "https://estama.jp/shop/42020/schedule/"
+    },
+    {
+      "area": "梅田",
+      "name": "梅田　ムフフ フットケアセンター",
+      "review_count": 330,
+      "shop_id": 39117,
+      "source_url": "https://estama.jp/shop/39117/schedule/"
+    },
+    {
+      "area": "日本橋",
+      "name": "俺の家",
+      "review_count": 312,
+      "shop_id": 29289,
+      "source_url": "https://estama.jp/shop/29289/schedule/"
+    },
+    {
+      "area": "堺筋本町",
+      "name": "Queen Spumante ークイーンスプマンテー",
+      "review_count": 302,
+      "shop_id": 31933,
+      "source_url": "https://estama.jp/shop/31933/schedule/"
+    },
+    {
+      "area": "日本橋",
+      "name": "belle femme（ベルファーム）　マット型コンセプト",
+      "review_count": 277,
+      "shop_id": 41349,
+      "source_url": "https://estama.jp/shop/41349/schedule/"
+    },
+    {
+      "area": "日本橋",
+      "name": "SPAすぷらっしゅ",
+      "review_count": 269,
+      "shop_id": 39981,
+      "source_url": "https://estama.jp/shop/39981/schedule/"
+    },
+    {
+      "area": "日本橋",
+      "name": "帝SPA (ミカドスパ)",
+      "review_count": 267,
+      "shop_id": 33975,
+      "source_url": "https://estama.jp/shop/33975/schedule/"
+    },
+    {
+      "area": "梅田",
+      "name": "梅田　ムフフ ヒトハダセンター",
+      "review_count": 256,
+      "shop_id": 41201,
+      "source_url": "https://estama.jp/shop/41201/schedule/"
+    },
+    {
+      "area": "日本橋",
+      "name": "Super (シューペル)マット型コンセプト",
+      "review_count": 253,
+      "shop_id": 43054,
+      "source_url": "https://estama.jp/shop/43054/schedule/"
+    },
+    {
+      "area": "堺筋本町",
+      "name": "FROGSPA〜ふろっぐすぱ",
+      "review_count": 237,
+      "shop_id": 28291,
+      "source_url": "https://estama.jp/shop/28291/schedule/"
+    },
+    {
+      "area": "日本橋",
+      "name": "Pinky ring （ピンキーリング）日本橋店",
+      "review_count": 232,
+      "shop_id": 41399,
+      "source_url": "https://estama.jp/shop/41399/schedule/"
+    },
+    {
+      "area": "堺東",
+      "name": "kitty",
+      "review_count": 231,
+      "shop_id": 42956,
+      "source_url": "https://estama.jp/shop/42956/schedule/"
+    },
+    {
+      "area": "天王寺",
+      "name": "SKB8000",
+      "review_count": 228,
+      "shop_id": 39174,
+      "source_url": "https://estama.jp/shop/39174/schedule/"
+    },
+    {
+      "area": "堺筋本町",
+      "name": "MariaElena〜マリアエレーナ〜",
+      "review_count": 228,
+      "shop_id": 48172,
+      "source_url": "https://estama.jp/shop/48172/schedule/"
+    },
+    {
+      "shop_id": 49476,
+      "name": "大阪 メンズエステ MACHERIE(マシェリ)",
+      "area": "大阪府 (全体総合)",
+      "source_url": "https://estama.jp/shop/49476/schedule/"
+    },
+    {
+      "shop_id": 49499,
+      "name": "メンズエステ《新時代》",
+      "area": "大阪府 (全体総合)",
+      "source_url": "https://estama.jp/shop/49499/schedule/"
+    },
+    {
+      "shop_id": 43646,
+      "name": "皇SPA",
+      "area": "大阪府 (全体総合)",
+      "source_url": "https://estama.jp/shop/43646/schedule/"
+    },
+    {
+      "shop_id": 51184,
+      "name": "ワールドスパ",
+      "area": "大阪府 (全体総合)",
+      "source_url": "https://estama.jp/shop/51184/schedule/"
+    },
+    {
+      "shop_id": 38134,
+      "name": "Femme Fatale（ファムファタール）",
+      "area": "大阪府 (全体総合)",
+      "source_url": "https://estama.jp/shop/38134/schedule/"
+    },
+    {
+      "shop_id": 51979,
+      "name": "高級メンズエステ Pure Refre [日本橋店]",
+      "area": "大阪府 (全体総合)",
+      "source_url": "https://estama.jp/shop/51979/schedule/"
+    },
+    {
+      "shop_id": 27217,
+      "name": "Darlin Premium(ダーリンプレミアム)",
+      "area": "梅田・大阪駅",
+      "source_url": "https://estama.jp/shop/27217/schedule/"
+    },
+    {
+      "shop_id": 52250,
+      "name": "白シャツと彼女「しろかの」梅田店",
+      "area": "梅田・大阪駅",
+      "source_url": "https://estama.jp/shop/52250/schedule/"
+    },
+    {
+      "shop_id": 50797,
+      "name": "VELIA（ヴェリア）",
+      "area": "梅田・大阪駅",
+      "source_url": "https://estama.jp/shop/50797/schedule/"
+    },
+    {
+      "shop_id": 43238,
+      "name": "濃密Candy梅田",
+      "area": "梅田・大阪駅",
+      "source_url": "https://estama.jp/shop/43238/schedule/"
+    },
+    {
+      "shop_id": 33537,
+      "name": "梅田メンズエステ SUPER HAPPY GIRLS",
+      "area": "梅田・大阪駅",
+      "source_url": "https://estama.jp/shop/33537/schedule/"
+    },
+    {
+      "shop_id": 40900,
+      "name": "梅田高級メンズエステ SUPER AKUMA GIRLS",
+      "area": "梅田・大阪駅",
+      "source_url": "https://estama.jp/shop/40900/schedule/"
+    },
+    {
+      "shop_id": 31981,
+      "name": "SARISARI(サリサリ)",
+      "area": "心斎橋・長堀橋",
+      "source_url": "https://estama.jp/shop/31981/schedule/"
+    },
+    {
+      "shop_id": 43728,
+      "name": "絶対肌感38.5℃【心斎橋ルーム＆出張無料】",
+      "area": "心斎橋・長堀橋",
+      "source_url": "https://estama.jp/shop/43728/schedule/"
+    },
+    {
+      "shop_id": 43664,
+      "name": "QueenSpumante 長堀橋店",
+      "area": "心斎橋・長堀橋",
+      "source_url": "https://estama.jp/shop/43664/schedule/"
+    },
+    {
+      "shop_id": 39488,
+      "name": "NUREST～ヌーレスト",
+      "area": "心斎橋・長堀橋",
+      "source_url": "https://estama.jp/shop/39488/schedule/"
+    },
+    {
+      "shop_id": 43485,
+      "name": "帝SPA",
+      "area": "日本橋",
+      "source_url": "https://estama.jp/shop/43485/schedule/"
+    },
+    {
+      "shop_id": 39639,
+      "name": "ワイフスパ「2度ご堪能いただけます」",
+      "area": "日本橋",
+      "source_url": "https://estama.jp/shop/39639/schedule/"
+    },
+    {
+      "shop_id": 48033,
+      "name": "煌めきSPA（キラメキスパ）",
+      "area": "日本橋",
+      "source_url": "https://estama.jp/shop/48033/schedule/"
+    },
+    {
+      "shop_id": 43310,
+      "name": "濃密Candy難波",
+      "area": "難波",
+      "source_url": "https://estama.jp/shop/43310/schedule/"
+    },
+    {
+      "shop_id": 34724,
+      "name": "SPA シルビア",
+      "area": "難波",
+      "source_url": "https://estama.jp/shop/34724/schedule/"
+    },
+    {
+      "shop_id": 48495,
+      "name": "LUXEAZ -ルクシーズ- 難波店",
+      "area": "難波",
+      "source_url": "https://estama.jp/shop/48495/schedule/"
+    },
+    {
+      "shop_id": 47573,
+      "name": "Melty Room -メルティールーム- 難波店",
+      "area": "難波",
+      "source_url": "https://estama.jp/shop/47573/schedule/"
+    },
+    {
+      "shop_id": 25081,
+      "name": "ミセス美オーラ",
+      "area": "難波",
+      "source_url": "https://estama.jp/shop/25081/schedule/"
+    },
+    {
+      "shop_id": 34895,
+      "name": "鏡花水月",
+      "area": "堺筋本町・本町・阿波座",
+      "source_url": "https://estama.jp/shop/34895/schedule/"
+    },
+    {
+      "shop_id": 28180,
+      "name": "大阪ニューハーフメンズエステのレディボーイズ",
+      "area": "堺筋本町・本町・阿波座",
+      "source_url": "https://estama.jp/shop/28180/schedule/"
+    },
+    {
+      "shop_id": 50392,
+      "name": "今日だけ彼女〜キョウカノ〜堺筋本町",
+      "area": "堺筋本町・本町・阿波座",
+      "source_url": "https://estama.jp/shop/50392/schedule/"
+    },
+    {
+      "shop_id": 49827,
+      "name": "京橋｜MOTEJO🩷教育されたモテる女達👄マンション型",
+      "area": "京橋・南森町・天満",
+      "source_url": "https://estama.jp/shop/49827/schedule/"
+    },
+    {
+      "shop_id": 50850,
+      "name": "京橋｜天雅 TENGA💎刺激より品格を。心に余韻を…派遣型",
+      "area": "京橋・南森町・天満",
+      "source_url": "https://estama.jp/shop/50850/schedule/"
+    },
+    {
+      "shop_id": 51335,
+      "name": "SUKI♡だらけ🏩隙がある女たちが最果てへと導く🏴‍☠️",
+      "area": "京橋・南森町・天満",
+      "source_url": "https://estama.jp/shop/51335/schedule/"
+    },
+    {
+      "shop_id": 27359,
+      "name": "ぽっちゃりエステ　つつみ",
+      "area": "天王寺・谷町",
+      "source_url": "https://estama.jp/shop/27359/schedule/"
+    },
+    {
+      "shop_id": 49765,
+      "name": "濃密Candy谷町九丁目",
+      "area": "天王寺・谷町",
+      "source_url": "https://estama.jp/shop/49765/schedule/"
+    },
+    {
+      "shop_id": 43797,
+      "name": "AMATERAS　新大阪・西中島ルーム",
+      "area": "十三・新大阪・西中島",
+      "source_url": "https://estama.jp/shop/43797/schedule/"
+    },
+    {
+      "shop_id": 50937,
+      "name": "新大阪｜でびにゃ🐾地獄という名の天国😈🔥マンション型",
+      "area": "十三・新大阪・西中島",
+      "source_url": "https://estama.jp/shop/50937/schedule/"
+    },
+    {
+      "shop_id": 29309,
+      "name": "みるくSPA",
+      "area": "十三・新大阪・西中島",
+      "source_url": "https://estama.jp/shop/29309/schedule/"
+    },
+    {
+      "shop_id": 27763,
+      "name": "クラウンマーメイド",
+      "area": "堺・堺東・我孫子",
+      "source_url": "https://estama.jp/shop/27763/schedule/"
+    },
+    {
+      "shop_id": 33881,
+      "name": "Mrs.C'est la vie（ミセス セラヴィ）",
+      "area": "堺・堺東・我孫子",
+      "source_url": "https://estama.jp/shop/33881/schedule/"
+    },
+    {
+      "shop_id": 29567,
+      "name": "ダイヤ",
+      "area": "堺・堺東・我孫子",
+      "source_url": "https://estama.jp/shop/29567/schedule/"
+    },
+    {
+      "shop_id": 48384,
+      "name": "アクアマリン",
+      "area": "堺・堺東・我孫子",
+      "source_url": "https://estama.jp/shop/48384/schedule/"
+    },
+    {
+      "shop_id": 40385,
+      "name": "イチャSPA",
+      "area": "堺・堺東・我孫子",
+      "source_url": "https://estama.jp/shop/40385/schedule/"
+    },
+    {
+      "shop_id": 39986,
+      "name": "Oil Madrid（オイルマドリード）",
+      "area": "堺・堺東・我孫子",
+      "source_url": "https://estama.jp/shop/39986/schedule/"
+    },
+    {
+      "shop_id": 32122,
+      "name": "SPA：Chill（スパチル）",
+      "area": "堺・堺東・我孫子",
+      "source_url": "https://estama.jp/shop/32122/schedule/"
+    },
+    {
+      "shop_id": 49913,
+      "name": "ダイヤ　布施ルーム",
+      "area": "東大阪 (布施)",
+      "source_url": "https://estama.jp/shop/49913/schedule/"
+    },
+    {
+      "shop_id": 35082,
+      "name": "メンズエステSPA Mona 東大阪/布施店",
+      "area": "東大阪 (布施)",
+      "source_url": "https://estama.jp/shop/35082/schedule/"
+    },
+    {
+      "shop_id": 48907,
+      "name": "4h~フォーエイチ江坂店",
+      "area": "江坂",
+      "source_url": "https://estama.jp/shop/48907/schedule/"
+    },
+    {
+      "shop_id": 32077,
+      "name": "TAKETONBO江坂",
+      "area": "江坂",
+      "source_url": "https://estama.jp/shop/32077/schedule/"
+    },
+    {
+      "shop_id": 48906,
+      "name": "ヒルガオ～大人セラピスト倶楽部～江坂店",
+      "area": "江坂",
+      "source_url": "https://estama.jp/shop/48906/schedule/"
+    },
+    {
+      "shop_id": 46480,
+      "name": "Anju spa",
+      "area": "高槻・茨木",
+      "source_url": "https://estama.jp/shop/46480/schedule/"
+    },
+    {
+      "shop_id": 50267,
+      "name": "高槻メンズエステAURA（オーラ）",
+      "area": "高槻・茨木",
+      "source_url": "https://estama.jp/shop/50267/schedule/"
+    },
+    {
+      "shop_id": 50390,
+      "name": "Mrs.Merci SPA高槻(ミセスメルシースパタカツキ）",
+      "area": "高槻・茨木",
+      "source_url": "https://estama.jp/shop/50390/schedule/"
+    },
+    {
+      "shop_id": 51716,
+      "name": "Tart《タルト》",
+      "area": "高槻・茨木",
+      "source_url": "https://estama.jp/shop/51716/schedule/"
+    },
+    {
+      "shop_id": 30813,
+      "name": "kitty(キティ)",
+      "area": "高槻・茨木",
+      "source_url": "https://estama.jp/shop/30813/schedule/"
+    },
+    {
+      "shop_id": 35407,
+      "name": "アットスパ茨木",
+      "area": "高槻・茨木",
+      "source_url": "https://estama.jp/shop/35407/schedule/"
+    },
+    {
+      "shop_id": 29713,
+      "name": "REST癒しのOL collection☆泉佐野本社",
+      "area": "その他大阪府",
+      "source_url": "https://estama.jp/shop/29713/schedule/"
+    }
+  ],
+  "status": "CONFIGURED",
+  "watchlist_name": "osaka_most_reviewed"
+}
