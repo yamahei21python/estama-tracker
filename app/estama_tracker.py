@@ -22,7 +22,7 @@ Usage:
     python estama_tracker.py sample [--db estama_sample.db]
     python estama_tracker.py sold-out [--date YYYY-MM-DD] [--db DB]
     python estama_tracker.py counts [--date YYYY-MM-DD] [--db DB]
-    python estama_tracker.py alert --date YYYY-MM-DD [--min-snapshots 3] [--threshold 0.7] [--db DB]
+    python estama_tracker.py alert --date YYYY-MM-DD [--min-days 3] [--threshold 0.7] [--db DB]
     python estama_tracker.py demo
     python estama_tracker.py verify [--db DB]
 """
@@ -170,23 +170,34 @@ def shops_with_no_table(conn, date):
     ).fetchall()
 
 
-def usually_sold_out_alert(conn, target_date, min_snapshots=3, threshold=0.7):
+def usually_sold_out_alert(conn, target_date, min_days=3, threshold=0.7):
     """Casts usually sold out but available/low on the target date.
 
-    History = snapshots BEFORE the target date only, so the target
-    day's own status cannot dilute its own history. A cast qualifies
-    when it has >= min_snapshots history rows and its sold_out rate
-    over those rows is >= threshold, and its target-date status is
-    'available' or 'low' (not sold_out, closed, or unknown).
+    History is counted in DAYS, not snapshot rows: a cast's status for
+    a day is the status of that day's LATEST observation (by
+    fetched_time, then snapshot_id), so intraday checkpoints can no
+    longer inflate the history (the pre-2026-10-26 code counted rows
+    and fired on 3 checkpoints of a single day). A cast qualifies
+    when it was observed on >= min_days distinct days before the
+    target date, its sold_out rate over those DAYS is >= threshold,
+    and its target-date day status is 'available' or 'low'.
     Returns (alerts, history_casts_considered).
     """
     history = conn.execute(
-        """SELECT shop_id, cast_name,
-                  COUNT(*) AS n,
-                  SUM(CASE WHEN status_norm = 'sold_out' THEN 1 ELSE 0 END) AS n_sold
-           FROM snapshots WHERE target_date < ?
+        """WITH daily AS (
+             SELECT shop_id, cast_name, target_date, status_norm,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY shop_id, cast_name, target_date
+                        ORDER BY fetched_time DESC, snapshot_id DESC
+                    ) AS rn
+             FROM snapshots WHERE target_date < ?
+           )
+           SELECT shop_id, cast_name,
+                  COUNT(*) AS n_days,
+                  SUM(CASE WHEN status_norm = 'sold_out' THEN 1 ELSE 0 END) AS n_sold_days
+           FROM daily WHERE rn = 1
            GROUP BY shop_id, cast_name HAVING COUNT(*) >= ?""",
-        (target_date, min_snapshots),
+        (target_date, min_days),
     ).fetchall()
     considered = len(history)
     usually = {
@@ -197,9 +208,18 @@ def usually_sold_out_alert(conn, target_date, min_snapshots=3, threshold=0.7):
     alerts = []
     if usually:
         rows = conn.execute(
-            """SELECT sn.shop_id, s.name, sn.cast_name, sn.status_norm, sn.status_raw
-               FROM snapshots sn JOIN shops s ON s.shop_id = sn.shop_id
-               WHERE sn.target_date = ? AND sn.status_norm IN ('available', 'low')""",
+            """WITH daily AS (
+                 SELECT sn.shop_id, s.name AS shop_name, sn.cast_name,
+                        sn.status_norm, sn.status_raw,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY sn.shop_id, sn.cast_name, sn.target_date
+                            ORDER BY sn.fetched_time DESC, sn.snapshot_id DESC
+                        ) AS rn
+                 FROM snapshots sn JOIN shops s ON s.shop_id = sn.shop_id
+                 WHERE sn.target_date = ?
+               )
+               SELECT shop_id, shop_name, cast_name, status_norm, status_raw
+               FROM daily WHERE rn = 1 AND status_norm IN ('available', 'low')""",
             (target_date,),
         ).fetchall()
         for shop_id, shop_name, cast, norm, raw in rows:
@@ -292,7 +312,9 @@ def main(argv=None):
     p.add_argument("--db", default=str(BASE / "estama.db"))
     p = sub.add_parser("alert", help="usually-sold-out but available/low")
     p.add_argument("--date", required=True)
-    p.add_argument("--min-snapshots", type=int, default=3)
+    p.add_argument("--min-days", "--min-snapshots", dest="min_days",
+                   type=int, default=3,
+                   help="minimum distinct history DAYS (was: snapshot rows)")
     p.add_argument("--threshold", type=float, default=0.7)
     p.add_argument("--db", default=str(BASE / "estama.db"))
     p = sub.add_parser("demo", help="in-memory alert-logic test")
@@ -351,7 +373,7 @@ def main(argv=None):
         return 0
     if args.cmd == "alert":
         alerts, considered = usually_sold_out_alert(
-            conn, args.date, args.min_snapshots, args.threshold)
+            conn, args.date, args.min_days, args.threshold)
         if considered == 0 or not alerts:
             if considered == 0:
                 print("alert: history insufficient - no cast has enough "
