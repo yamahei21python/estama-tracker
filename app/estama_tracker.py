@@ -4,14 +4,12 @@
 Python standard library only. No live scraping, no login, no reservation.
 
 Design (see README.md):
-- The watchlist is configured in shops.json, NOT derived from live list
-  order on each run. Scope change 2026-10-26: the final watchlist will be
-  the 20 Osaka shops with the most reviews. Until shops.json is filled,
-  there is no final watchlist.
-- Snapshots are imported from JSON files in a fixed format
-  (sample_2026-10-26_top20.json is an example of that format, kept as a
-  SAMPLE only). A future review-rich snapshot is dropped in with the
-  same format and loaded with `load` -- no code change needed.
+- The watchlist lives in shops.json and is maintained by the ranking
+  scraper's sync (plus the runner's ban list), NOT derived from live
+  list order on each run.
+- In production the snapshots table is written by estama_scraper.py;
+  this tracker is the analysis side (sold-out lists, counts, alerts).
+  `load` still imports snapshot JSON files in the original format.
 - Sold-out is decided ONLY from the therapist-level status text
   (status_raw -> status_norm). Slot symbols (○/×/─) are auxiliary text
   and are NEVER used to decide sold_out.
@@ -19,7 +17,6 @@ Design (see README.md):
 Usage:
     python estama_tracker.py status
     python estama_tracker.py load <snapshot.json> [--shops shops.json] [--db estama.db]
-    python estama_tracker.py sample [--db estama_sample.db]
     python estama_tracker.py sold-out [--date YYYY-MM-DD] [--db DB]
     python estama_tracker.py counts [--date YYYY-MM-DD] [--db DB]
     python estama_tracker.py alert --date YYYY-MM-DD [--min-days 3] [--threshold 0.7] [--db DB]
@@ -33,40 +30,18 @@ import sqlite3
 import sys
 from pathlib import Path
 
-BASE = Path(__file__).resolve().parent
-SCHEMA = BASE / "schema.sql"
-DEFAULT_SHOPS = BASE / "shops.json"
-SAMPLE = BASE / "sample_2026-10-26_top20.json"
+from common import (BASE_DIR as BASE, SCHEMA_PATH as SCHEMA,
+                    SHOPS_JSON_PATH as DEFAULT_SHOPS, connect_db, load_json,
+                    normalize_status_text)
 
 
 def normalize_status(raw):
-    """Map a therapist-level status string to a normalized status.
-
-    Order matters: sold_out is checked before 'closed', because the
-    wording for sold-out contains neither '受付終了' nor '残りわずか'.
-    '受付終了' / '本日受付終了' is 'closed', explicitly NOT sold_out.
-    Anything unrecognised (including '時間のみ' and empty) is 'unknown'.
-    Slot symbols are never passed to this function.
-    """
-    if raw is None:
-        return "unknown"
-    text = str(raw)
-    if "ご好評につき本日完売" in text or text.strip() == "本日完売":
-        return "sold_out"
-    if "受付終了" in text:
-        return "closed"
-    if "残りわずか" in text:
-        return "low"
-    if "今すぐご案内" in text or "ご予約受付中" in text or "以内でご案内" in text:
-        return "available"
-    return "unknown"
+    """Kept for compatibility; the mapping lives in common.py."""
+    return normalize_status_text(raw)
 
 
 def connect(db_path):
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.executescript(SCHEMA.read_text(encoding="utf-8"))
-    return conn
+    return connect_db(db_path)
 
 
 def load_watchlist(shops_path):
@@ -78,7 +53,7 @@ def load_watchlist(shops_path):
     """
     if shops_path is None or not Path(shops_path).exists():
         return {}, None
-    data = json.loads(Path(shops_path).read_text(encoding="utf-8"))
+    data = load_json(shops_path, default={})
     ids = {int(s["shop_id"]) for s in data.get("shops", [])}
     return data, (ids if ids else None)
 
@@ -302,8 +277,6 @@ def main(argv=None):
     p.add_argument("snapshot")
     p.add_argument("--shops", default=str(DEFAULT_SHOPS))
     p.add_argument("--db", default=str(BASE / "estama.db"))
-    p = sub.add_parser("sample", help="load the top-20 SAMPLE file only")
-    p.add_argument("--db", default=str(BASE / "estama_sample.db"))
     p = sub.add_parser("sold-out", help="today's sold-out list")
     p.add_argument("--date", required=True)
     p.add_argument("--db", default=str(BASE / "estama.db"))
@@ -329,30 +302,17 @@ def main(argv=None):
     if args.cmd == "status":
         data, ids = load_watchlist(DEFAULT_SHOPS)
         if ids is None:
-            print("watchlist: PENDING - shops.json has no shops yet.")
-            print("Final watchlist = 20 Osaka shops with the most reviews, "
-                  "to be collected separately.")
-            print("Sample file available: sample_2026-10-26_top20.json "
-                  "(SAMPLE ONLY, not the final watchlist).")
+            print("watchlist: shops.json is missing or empty.")
         else:
             print(f"watchlist: {data.get('watchlist_name')} - "
                   f"{len(ids)} shops configured")
         return 0
 
-    if args.cmd == "sample":
-        conn = connect(args.db)
-        stats = load_snapshot(conn, SAMPLE, watchlist_ids=None)
-        print(f"sample loaded into {args.db} (SAMPLE ONLY, not final): {stats}")
-        print_verify(conn)
-        return 0
-
     if args.cmd == "load":
         _, ids = load_watchlist(args.shops)
         if ids is None:
-            print("WARNING: shops.json watchlist is empty/pending. "
-                  "Loading without a watchlist filter; this load is NOT "
-                  "a finalized watchlist. Fill shops.json with the "
-                  "review-rich 20 before treating a DB as final.")
+            print("WARNING: shops.json watchlist is empty. "
+                  "Loading without a watchlist filter.")
         conn = connect(args.db)
         stats = load_snapshot(conn, args.snapshot, watchlist_ids=ids)
         print(f"loaded into {args.db}: {stats}")

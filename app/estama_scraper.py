@@ -34,11 +34,11 @@ except ImportError:
     print("Install them with: pip install requests beautifulsoup4", file=sys.stderr)
     sys.exit(1)
 
-BASE_DIR = Path(__file__).resolve().parent
+from common import (BASE_DIR, DB_PATH as DEFAULT_DB, SCHEMA_PATH,
+                    SHOPS_JSON_PATH as DEFAULT_SHOPS_JSON, connect_db,
+                    load_json, make_session, normalize_status_text, save_json)
+
 DEFAULT_SHOP_ID = 40900  # 梅田高級メンズエステ SUPER AKUMA GIRLS
-DEFAULT_DB = BASE_DIR / "estama.db"
-SCHEMA_PATH = BASE_DIR / "schema.sql"
-DEFAULT_SHOPS_JSON = BASE_DIR / "shops.json"
 
 # Recommended execution checkpoints: hourly at :30 (24 per day).
 # A full 74-shop run takes ~5 min, so hourly fits and doubles the
@@ -106,14 +106,7 @@ class EstamaScraper:
         self.shop_id = int(shop_id)
         self.base_url = f"https://estama.jp/shop/{self.shop_id}/schedule/"
         self.ajax_url = "https://estama.jp/post/shop_schedule_ctrl"
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Referer": self.base_url,
-        })
+        self.session = make_session(referer=self.base_url)
         self.csrf_name = None
         self.csrf_value = None
         self.shop_metadata = {}
@@ -411,15 +404,9 @@ class EstamaScraper:
         # --- TODAY (days_offset == 0) ---
         if days_offset == 0:
             if raw:
-                text = str(raw)
-                if "ご好評につき本日完売" in text or text.strip() == "本日完売":
-                    return "sold_out"
-                if "受付終了" in text:
-                    return "closed"
-                if "残りわずか" in text:
-                    return "low"
-                if "今すぐご案内" in text or "ご予約受付中" in text or "以内でご案内" in text:
-                    return "available"
+                mapped = normalize_status_text(raw)
+                if mapped != "unknown":
+                    return mapped
 
             if circles > 0:
                 return "low" if circles <= 2 else "available"
@@ -558,7 +545,7 @@ def export_to_snapshots(data, output_dir=None):
             ]
         }
 
-        filename.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_json(filename, payload)
         generated_files.append(filename)
 
     return generated_files
@@ -566,10 +553,7 @@ def export_to_snapshots(data, output_dir=None):
 
 def import_into_db(data, db_path=DEFAULT_DB):
     """Import multi-day scrape result directly into SQLite estama.db with fetched_time and work hours."""
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys = ON")
-    if SCHEMA_PATH.exists():
-        conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    conn = connect_db(db_path)
 
     shop = data["shop"]
     conn.execute(
@@ -623,7 +607,7 @@ def show_speed_ranking(date_str=None, db_path=DEFAULT_DB, shop_id=DEFAULT_SHOP_I
     if date_str is None:
         date_str = datetime.now().strftime("%Y-%m-%d")
 
-    conn = sqlite3.connect(db_path)
+    conn = connect_db(db_path, apply_schema=False)
     cur = conn.cursor()
 
     # Query earliest sold-out time for each cast on target date
@@ -746,7 +730,7 @@ def load_shops_json(shops_json_path=DEFAULT_SHOPS_JSON):
     if not p.exists():
         print(f"Error: {shops_json_path} not found.", file=sys.stderr)
         sys.exit(1)
-    data = json.loads(p.read_text(encoding="utf-8"))
+    data = load_json(p, default={})
     return data.get("shops", [])
 
 

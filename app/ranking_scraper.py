@@ -27,10 +27,9 @@ except ImportError:
     print("Install them with: pip install requests beautifulsoup4", file=sys.stderr)
     sys.exit(1)
 
-BASE_DIR = Path(__file__).resolve().parent
-DEFAULT_DB = BASE_DIR / "estama.db"
-DEFAULT_SHOPS_JSON = BASE_DIR / "shops.json"
-SCHEMA_PATH = BASE_DIR / "schema.sql"
+from common import (BASE_DIR, DB_PATH as DEFAULT_DB, SCHEMA_PATH,
+                    SHOPS_JSON_PATH as DEFAULT_SHOPS_JSON, connect_db,
+                    load_json, make_session, save_json)
 
 # Osaka Area Definitions on estama.jp
 OSAKA_AREAS = {
@@ -63,13 +62,7 @@ COLOR_RESET = "\033[0m"
 
 class RankingScraper:
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-        })
+        self.session = make_session()
 
     def scrape_area_ranking(self, area_code="2701", period="weekly"):
         """Scrape ranking for a specific area (e.g. 2701: Umeda, 2700: Osaka)."""
@@ -201,10 +194,7 @@ def print_ranking_report(data):
 
 def import_rankings_into_db(data_list, db_path=DEFAULT_DB):
     """Save ranking results into SQLite cast_rankings table."""
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys = ON")
-    if SCHEMA_PATH.exists():
-        conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    conn = connect_db(db_path)
 
     total_inserted = 0
     for data in data_list:
@@ -238,10 +228,7 @@ def import_rankings_into_db(data_list, db_path=DEFAULT_DB):
 
 def sync_top_shops_to_watchlist(data_list, shops_json_path=DEFAULT_SHOPS_JSON, top_n=10):
     """Extract shops of top-ranked casts and add missing ones to shops.json."""
-    if not Path(shops_json_path).exists():
-        current_data = {"shops": []}
-    else:
-        current_data = json.loads(Path(shops_json_path).read_text(encoding="utf-8"))
+    current_data = load_json(shops_json_path, default={"shops": []})
 
     existing_ids = {int(s["shop_id"]) for s in current_data.get("shops", [])}
     new_shops_added = 0
@@ -262,10 +249,7 @@ def sync_top_shops_to_watchlist(data_list, shops_json_path=DEFAULT_SHOPS_JSON, t
                 new_shops_added += 1
 
     if new_shops_added > 0:
-        Path(shops_json_path).write_text(
-            json.dumps(current_data, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
+        save_json(shops_json_path, current_data)
 
     return new_shops_added
 
@@ -317,7 +301,7 @@ def main():
     if args.save_json:
         for d in all_results:
             filename = BASE_DIR / f"ranking_{d['period']}_{d['area_code']}_{d['fetched_date']}.json"
-            filename.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+            save_json(filename, d)
             print(f"{COLOR_GREEN}✅ Saved JSON:{COLOR_RESET} {filename}")
 
     if args.import_db:
