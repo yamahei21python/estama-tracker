@@ -464,6 +464,90 @@
       "name": "REST癒しのOL collection☆泉佐野本社",
       "area": "その他大阪府",
       "source_url": "https://estama.jp/shop/29713/schedule/"
+    },
+    {
+      "shop_id": 44323,
+      "name": "梅田高級メンズエステ SUPER OTONA GIRLS",
+      "area": "梅田・大阪駅",
+      "source_url": "https://estama.jp/shop/44323/schedule/"
+    },
+    {
+      "shop_id": 50393,
+      "name": "今日だけ彼女〜キョウカノ〜長堀橋",
+      "area": "心斎橋・長堀橋",
+      "source_url": "https://estama.jp/shop/50393/schedule/"
+    },
+    {
+      "shop_id": 49798,
+      "name": "大人女子～穏やかなご褒美～",
+      "area": "心斎橋・長堀橋",
+      "source_url": "https://estama.jp/shop/49798/schedule/"
+    },
+    {
+      "shop_id": 43715,
+      "name": "YOLU SPA 大阪店 日本橋ルーム",
+      "area": "日本橋",
+      "source_url": "https://estama.jp/shop/43715/schedule/"
+    },
+    {
+      "shop_id": 32646,
+      "name": "ぽっちゃり系 メンズエステ スイカとメロン",
+      "area": "日本橋",
+      "source_url": "https://estama.jp/shop/32646/schedule/"
+    },
+    {
+      "shop_id": 44312,
+      "name": "EGOIST",
+      "area": "難波",
+      "source_url": "https://estama.jp/shop/44312/schedule/"
+    },
+    {
+      "shop_id": 44609,
+      "name": "YOLU SPA 大阪店　難波ルーム",
+      "area": "難波",
+      "source_url": "https://estama.jp/shop/44609/schedule/"
+    },
+    {
+      "shop_id": 34753,
+      "name": "透け感97％　難波・心斎橋店",
+      "area": "難波",
+      "source_url": "https://estama.jp/shop/34753/schedule/"
+    },
+    {
+      "shop_id": 33507,
+      "name": "美魔女セラピー",
+      "area": "堺筋本町・本町・阿波座",
+      "source_url": "https://estama.jp/shop/33507/schedule/"
+    },
+    {
+      "shop_id": 32779,
+      "name": "Mrs.AUBE SPA（オーブスパ）",
+      "area": "京橋・南森町・天満",
+      "source_url": "https://estama.jp/shop/32779/schedule/"
+    },
+    {
+      "shop_id": 51919,
+      "name": "大阪屋🔥京橋最安値🔥",
+      "area": "京橋・南森町・天満",
+      "source_url": "https://estama.jp/shop/51919/schedule/"
+    },
+    {
+      "shop_id": 39209,
+      "name": "上位1%のセラピスト「J1」",
+      "area": "天王寺・谷町",
+      "source_url": "https://estama.jp/shop/39209/schedule/"
+    },
+    {
+      "shop_id": 30039,
+      "name": "M esthe -エムエステ-",
+      "area": "十三・新大阪・西中島",
+      "source_url": "https://estama.jp/shop/30039/schedule/"
+    },
+    {
+      "shop_id": 34831,
+      "name": "MADAM JEWEL",
+      "area": "堺・堺東・我孫子",
+      "source_url": "https://estama.jp/shop/34831/schedule/"
     }
   ],
   "status": "CONFIGURED",
