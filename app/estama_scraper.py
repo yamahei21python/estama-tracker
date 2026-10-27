@@ -639,6 +639,17 @@ def import_into_db(data, db_path=DEFAULT_DB):
     return total_inserted
 
 
+def _speed_rank_badge(first_time):
+    """Return the sold-out speed badge for a first observed time."""
+    if first_time < "06:00":
+        return f"{COLOR_MAGENTA}【深夜完売 🌙】{COLOR_RESET}"
+    if first_time <= "12:00":
+        return f"{COLOR_RED}【超速完売 ⚡ プレミア】{COLOR_RESET}"
+    if first_time <= "17:00":
+        return f"{COLOR_YELLOW}【夕方完売 🔥 人気】{COLOR_RESET}"
+    return f"{COLOR_CYAN}【夜間完売】{COLOR_RESET}"
+
+
 def show_speed_ranking(date_str=None, db_path=DEFAULT_DB, shop_id=DEFAULT_SHOP_ID):
     """Analyze and display which casts sold out earliest on a given date."""
     if date_str is None:
@@ -647,25 +658,33 @@ def show_speed_ranking(date_str=None, db_path=DEFAULT_DB, shop_id=DEFAULT_SHOP_I
     conn = connect_db(db_path, apply_schema=False)
     cur = conn.cursor()
 
-    # Query earliest sold-out time for each cast on target date
+    # Query earliest sold-out time for each cast on target date.
+    # Chronology comes from fetched_at (full timestamp); legacy rows fall back
+    # to fetched_time when the full timestamp is absent:
+    # fetched_time alone orders 00-05 (next calendar day, same
+    # target_date) before 10:xx, which reported a 13:33 sold-out as
+    # "00:33". Display keeps the HH:MM part.
     query = """
     SELECT 
         cast_name,
-        MIN(fetched_time) as first_sold_out_time,
+        COALESCE(substr(MIN(fetched_at), 12, 5), MIN(fetched_time)) as first_sold_out_time,
         COUNT(*) as total_records,
         MAX(shift) as shift,
         MAX(work_hours) as work_hours
     FROM snapshots
     WHERE target_date = ? AND shop_id = ? AND status_norm = 'sold_out'
     GROUP BY cast_name
-    ORDER BY first_sold_out_time ASC, work_hours DESC
+    ORDER BY COALESCE(MIN(fetched_at), MIN(fetched_time), ''), work_hours DESC
     """
     cur.execute(query, (date_str, shop_id))
     sold_out_rows = cur.fetchall()
 
-    # Query all active checkpoints on that date
+    # Query all active checkpoints on that date, in real chronological
+    # order (fetched_at across midnight, not fetched_time string order)
     cur.execute(
-        "SELECT DISTINCT fetched_time FROM snapshots WHERE target_date = ? AND shop_id = ? ORDER BY fetched_time",
+        "SELECT fetched_time FROM snapshots WHERE target_date = ? AND shop_id = ? "
+        "GROUP BY fetched_time "
+        "ORDER BY COALESCE(MIN(fetched_at), MIN(fetched_time), '')",
         (date_str, shop_id)
     )
     recorded_times = [r[0] for r in cur.fetchall()]
@@ -681,11 +700,7 @@ def show_speed_ranking(date_str=None, db_path=DEFAULT_DB, shop_id=DEFAULT_SHOP_I
         medals = ["🥇", "🥈", "🥉"]
         for idx, (name, first_time, rec_cnt, shift, work_hours) in enumerate(sold_out_rows, 1):
             rank_str = medals[idx - 1] if idx <= 3 else f"{idx:2d}位"
-            speed_badge = (
-                f"{COLOR_RED}【超速完売 ⚡ プレミア】{COLOR_RESET}" if first_time <= "12:00"
-                else (f"{COLOR_YELLOW}【夕方完売 🔥 人気】{COLOR_RESET}" if first_time <= "17:00"
-                else f"{COLOR_CYAN}【夜間完売】{COLOR_RESET}")
-            )
+            speed_badge = _speed_rank_badge(first_time)
             if shift and work_hours:
                 hours_tag = f"{COLOR_MAGENTA}[ロング {work_hours}h]{COLOR_RESET}" if work_hours >= 8.0 else f"[{work_hours}h]"
                 shift_info = f"{hours_tag} {shift}"
@@ -707,7 +722,7 @@ def show_speed_ranking(date_str=None, db_path=DEFAULT_DB, shop_id=DEFAULT_SHOP_I
             SELECT cast_name, fetched_time, status_norm
             FROM snapshots
             WHERE target_date = ? AND shop_id = ?
-            ORDER BY cast_name, fetched_time
+            ORDER BY cast_name, fetched_at, snapshot_id
             """,
             (date_str, shop_id)
         )
