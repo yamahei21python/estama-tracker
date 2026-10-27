@@ -32,6 +32,8 @@ text_cases = [
     ("ご予約受付中", "available"),
     ("30分以内でご案内", "available"),
     ("時間のみ", "unknown"),
+    ("TELのみ", "dummy"),
+    ("今すぐご案内 / TELのみ", "dummy"),
     ("", "unknown"),
     (None, "unknown"),
 ]
@@ -54,6 +56,51 @@ slot_cases = [
 for raw, c, x, off, want in slot_cases:
     got = norm(raw, c, x, off)
     check(f"slots raw={raw!r} o={c} x={x} off={off} -> {want}", got == want)
+
+# --- TEL column (data-idx vertical mapping + pattern) ---
+from bs4 import BeautifulSoup  # noqa: E402
+
+TEL_HTML = """
+<table>
+<thead><tr>
+  <th></th>
+  <th class="th_sce"><div class="item-name"><h4>正常(20)</h4></div>
+    <div class="item-date">10:00～18:00</div>
+    <a class="link-detail" href="/shop/1/cast/111/"></a></th>
+  <th class="th_sce"><div class="item-name"><h4>ダミー(22)</h4></div>
+    <div class="item-date">12:00～26:00</div>
+    <a class="link-detail" href="/shop/1/cast/222/"></a></th>
+</tr></thead>
+<tbody>
+<tr><th>10:00</th>
+  <td data-idx="111">○</td><td data-idx="222">TEL</td></tr>
+<tr><th>10:30</th>
+  <td data-idx="111">─</td><td data-idx="222">TEL</td></tr>
+<tr><th>11:00</th>
+  <td data-idx="111">○</td><td data-idx="222">TEL</td></tr>
+</tbody></table>
+"""
+s2 = EstamaScraper.__new__(EstamaScraper)
+casts, _ = s2._parse_schedule_html(TEL_HTML, "2026-10-27", 0)
+by_name = {c["cast_name"]: c for c in casts}
+
+ok_cast = by_name.get("正常")
+check("TEL fixture has 正常", ok_cast is not None)
+if ok_cast:
+    check("正常 keeps ○ pattern", ok_cast["slot_pattern"].startswith("○2コマ"))
+    check("正常 status low (2 circles)", ok_cast["status_norm"] == "low")
+    check("正常 tel_cells=0", ok_cast["slots_summary"]["tel_cells"] == 0)
+
+dummy = by_name.get("ダミー")
+check("TEL fixture has ダミー", dummy is not None)
+if dummy:
+    check("ダミー pattern all TEL", dummy["slot_pattern"] == "全3コマ TEL (電話のみ)")
+    check("ダミー status_raw TELのみ", dummy["status_raw"] == "TELのみ")
+    check("ダミー status_norm dummy", dummy["status_norm"] == "dummy")
+    check("ダミー tel_cells=3", dummy["slots_summary"]["tel_cells"] == 3)
+    check("ダミー shift kept", dummy["shift"] == "12:00～26:00")
+    # vertical data-idx: TEL must land on 222, not shift columns
+    check("ダミー no false circles", dummy["slots_summary"]["open_circles"] == 0)
 
 print("\nRESULT:", "ALL PASS" if not fails else f"FAILURES: {fails}")
 sys.exit(1 if fails else 0)

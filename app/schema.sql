@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
     work_hours   REAL,    -- e.g. 8.0
     status_raw   TEXT,
     status_norm  TEXT NOT NULL CHECK (
-        status_norm IN ('sold_out', 'closed', 'low', 'available', 'unknown')
+        status_norm IN ('sold_out', 'closed', 'low', 'available', 'unknown', 'dummy')
     ),
     slot_pattern TEXT,
     target_date  TEXT NOT NULL,

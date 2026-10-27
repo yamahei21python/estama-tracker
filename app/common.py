@@ -70,7 +70,58 @@ def connect_db(db_path=None, apply_schema: bool = True) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     if apply_schema and SCHEMA_PATH.exists():
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+        _migrate_status_norm_dummy(conn)
     return conn
+
+
+def _migrate_status_norm_dummy(conn) -> None:
+    """Rebuild snapshots if its CHECK lacks 'dummy' (TEL-only casts).
+
+    SQLite cannot ALTER a CHECK constraint; recreate table + indexes
+    and copy rows. Idempotent: no-op once 'dummy' is in the SQL text.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='snapshots'"
+    ).fetchone()
+    if not row or not row[0] or "dummy" in row[0]:
+        return
+    conn.executescript(
+        """
+        CREATE TABLE snapshots_new (
+            snapshot_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+            shop_id      INTEGER NOT NULL REFERENCES shops (shop_id),
+            cast_name    TEXT NOT NULL,
+            cast_id      INTEGER,
+            age          INTEGER,
+            shift        TEXT,
+            shift_start  TEXT,
+            shift_end    TEXT,
+            work_minutes INTEGER,
+            work_hours   REAL,
+            status_raw   TEXT,
+            status_norm  TEXT NOT NULL CHECK (
+                status_norm IN ('sold_out', 'closed', 'low', 'available', 'unknown', 'dummy')
+            ),
+            slot_pattern TEXT,
+            target_date  TEXT NOT NULL,
+            fetched_at   TEXT,
+            fetched_time TEXT,
+            UNIQUE (shop_id, cast_name, target_date, fetched_time)
+        );
+        INSERT INTO snapshots_new SELECT * FROM snapshots;
+        DROP TABLE snapshots;
+        ALTER TABLE snapshots_new RENAME TO snapshots;
+        CREATE INDEX IF NOT EXISTS idx_snapshots_cast_date
+            ON snapshots (shop_id, cast_name, target_date);
+        CREATE INDEX IF NOT EXISTS idx_snapshots_status_date
+            ON snapshots (status_norm, target_date);
+        CREATE INDEX IF NOT EXISTS idx_snapshots_time
+            ON snapshots (target_date, fetched_time);
+        CREATE INDEX IF NOT EXISTS idx_snapshots_work_hours
+            ON snapshots (work_hours);
+        """
+    )
+    conn.commit()
 
 
 def load_json(path, default=None):
@@ -91,6 +142,7 @@ def normalize_status_text(raw) -> str:
     Order matters: sold_out is checked before 'closed', because the
     wording for sold-out contains neither '受付終了' nor '残りわずか'.
     '受付終了' / '本日受付終了' is 'closed', explicitly NOT sold_out.
+    'TELのみ' (scraper label for all-TEL columns) is 'dummy'.
     Anything unrecognised (including '時間のみ' and empty) is 'unknown'.
     Slot symbols are never consulted here.
     """
@@ -99,6 +151,8 @@ def normalize_status_text(raw) -> str:
     text = str(raw)
     if "ご好評につき本日完売" in text or text.strip() == "本日完売":
         return "sold_out"
+    if "TELのみ" in text:
+        return "dummy"
     if "受付終了" in text:
         return "closed"
     if "残りわずか" in text:

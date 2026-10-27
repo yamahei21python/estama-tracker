@@ -319,15 +319,25 @@ class EstamaScraper:
                 "slots": []
             })
 
+        # Vertical key: td[data-idx] == cast_id. Prefer it over column
+        # position so a trailing action cell (TEL) cannot shift marks.
+        id_to_col = {}
+        for i, c in enumerate(cast_cols):
+            if c["cast_id"] is not None:
+                id_to_col[str(c["cast_id"])] = i
+
         for tr in tbody.find_all("tr"):
             cells = tr.find_all(["th", "td"])
             if not cells:
                 continue
             time_slot = cells[0].get_text(strip=True)
             for idx, cell in enumerate(cells[1:]):
-                if idx < len(cast_cols):
-                    mark = cell.get_text(strip=True)
-                    cast_cols[idx]["slots"].append((time_slot, mark))
+                mark = cell.get_text(strip=True)
+                target = id_to_col.get(cell.get("data-idx") or "")
+                if target is None and idx < len(cast_cols):
+                    target = idx
+                if target is not None:
+                    cast_cols[target]["slots"].append((time_slot, mark))
 
         final_casts = []
         for col in cast_cols:
@@ -335,17 +345,30 @@ class EstamaScraper:
             circles = marks.count("○")
             crosses = marks.count("×")
             dashes = marks.count("─")
+            tels = sum(1 for m in marks if m.upper() == "TEL")
 
             raw = col["status_raw"]
             norm = self._normalize_status(raw, circles, crosses, days_offset)
+            # All-TEL column = dummy cast (not real available/closed).
+            # sold_out text still wins: real demand signal.
+            if tels > 0 and circles == 0 and crosses == 0 and norm != "sold_out":
+                norm = "dummy"
 
             if circles > 0:
                 slot_pattern = f"○{circles}コマ / ×{crosses}コマ (予約可)"
+                if tels:
+                    slot_pattern += f" + TEL{tels}"
             elif crosses > 0:
                 if days_offset == 0:
                     slot_pattern = f"○0コマ / ×{crosses}コマ (本日完売)"
                 else:
                     slot_pattern = f"○0コマ / ×{crosses}コマ (全コマ×/予約不可)"
+                if tels:
+                    slot_pattern += f" + TEL{tels}"
+            elif tels > 0 and dashes == 0:
+                slot_pattern = f"全{tels}コマ TEL (電話のみ)"
+            elif tels > 0:
+                slot_pattern = f"全{dashes}コマ ─ + TEL{tels} (電話のみ混在)"
             else:
                 slot_pattern = f"全{dashes}コマ ─ (受付終了/待機)"
 
@@ -356,10 +379,16 @@ class EstamaScraper:
                     status_raw = "予約受付中"
                 elif crosses > 0 and circles == 0:
                     status_raw = "全コマ×(事前予約不可/おとり候補)"
+                elif norm == "dummy" or (tels > 0 and circles == 0 and crosses == 0):
+                    status_raw = "TELのみ"
                 else:
                     status_raw = "時間のみ"
             else:
                 status_raw = raw
+                # Keep site text, but mark TEL-only in raw when norm is dummy
+                # and the site text would otherwise look bookable.
+                if norm == "dummy" and tels > 0 and circles == 0 and crosses == 0:
+                    status_raw = f"{raw} / TELのみ"
 
             shift_start, shift_end, work_minutes, work_hours = parse_shift_details(col["shift"], col["slots"])
 
@@ -378,7 +407,8 @@ class EstamaScraper:
                 "slots_summary": {
                     "open_circles": circles,
                     "reserved_crosses": crosses,
-                    "off_dashes": dashes
+                    "off_dashes": dashes,
+                    "tel_cells": tels
                 }
             })
 
@@ -394,8 +424,9 @@ class EstamaScraper:
 
     def _normalize_status(self, raw, circles, crosses, days_offset):
         """Map text & slot availability to normalized status:
-        ('sold_out', 'closed', 'low', 'available', 'unknown')
+        ('sold_out', 'closed', 'low', 'available', 'unknown', 'dummy')
 
+        'dummy' is applied by the caller when the whole column is TEL.
         CRITICAL RULE:
         'sold_out' is strictly limited to TODAY (days_offset == 0).
         Future dates (days_offset >= 1) NEVER receive 'sold_out', because live
@@ -455,6 +486,8 @@ def format_status_badge(norm):
         return f"{COLOR_GREEN}【予約可能 OPEN】{COLOR_RESET}"
     elif norm == "closed":
         return f"{COLOR_DIM}【受付終了 CLOSED】{COLOR_RESET}"
+    elif norm == "dummy":
+        return f"{COLOR_MAGENTA}【TELのみ DUMMY】{COLOR_RESET}"
     return f"{COLOR_CYAN}【未確定/不可 UNKNOWN】{COLOR_RESET}"
 
 
@@ -493,6 +526,9 @@ def print_summary_report(data):
             else:
                 shift_str = "[時間未定]"
             slots_info = f"○:{c['slots_summary']['open_circles']} ×:{c['slots_summary']['reserved_crosses']}"
+            tels = c["slots_summary"].get("tel_cells", 0)
+            if tels:
+                slots_info += f" TEL:{tels}"
 
             print(f"  {badge:<24} {COLOR_BOLD}{c['cast_name']}{age_str}{COLOR_RESET:<14} {shift_str:<22} {slots_info:<12} (表示: {c['status_raw']})")
 
