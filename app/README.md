@@ -82,6 +82,9 @@ python3 tests/test_prune.py           # 出禁ルール
 - **アラートの履歴は「日数」で数える**。1日の状態はその日の最終観測で代表させる。チェックポイントの回数で水増しはしない
 - **最終状態は分析時にのみ R3 反転する**（`final_rows` / `counts` / `sold-out` / `alert` 経由）。サイトは終業時に全キャストを `closed` へリセットする（店全体フリップは退勤後30分前後、個人終業は shift_end+30分前後）ため、最終観測が `closed` の場合は**その日の最後の non-closed 観測を最終状態とする**（終日 closed なら closed のまま）。DB 行は生のまま。終業時刻の分析は `status_raw` / `shift_end` の生データを使う。日跨ぎの時系列は `fetched_at`（`YYYY-MM-DD HH:MM:SS JST`）順で判定する（`fetched_time` 単独は 00-05 時台が誤順になる）
 - **完売スピード分析（`--speed-rank`）も `fetched_at` 基準**。`target_date` は営業日なので 00-05 時台の checkpoint は翌暦日だが同一 target に入る。旧実装は `MIN(fetched_time)` の文字列比較で 13:33 完売を「00:33」と誤報告していた（実データ21件該当）。06:00未満の完売は「深夜完売」バッジ（超速判定に入れない）
+- **集計キーは `cast_id`**（`COALESCE(cast_id, cast_name)`）。R3 partition・alert 履歴/対象・speed-rank の group by すべて。同一 cast_id の改名（実績: 953092 が1日内で2名前）を2人に数えないため。counts の分母は `counts --date 2026-10-26` = 920（旧 921 は改名分裂の誤り）
+- **`全コマ×(事前予約不可/おとり候補)` = `dummy`**。当日で文言なし・全枠×のキャストは予約不可かつおとり候補。旧 `unknown` の14行は初回接続時の移行（`_migrate_reclassify_decoy`）で `dummy` に再分類（`status_raw` は不変）。未来日の全全枠×は従来通り `unknown`（実状態が不明なため）
+- **シフト時刻の文字列比較は禁止**。`shift_start`/`shift_end` は非ゼロ埋め（`9:00`）＋24時超表記（`29:00` = 翌5時）のため、`'9:00' > '23:00'` が文字列比較で真になる。`common.parse_clock()`（分単位 int）で比較すること。`work_hours` は既に正規計算済み
 - `shops.json` の `area` は情報項目で、ロジックは参照しない（初期店は店舗の地域、ランキング同期で追加された店はランキングのエリア名が入る）
 - **「時間のみ」ステータス**: サイト側がステータス文言を設定していないキャスト（予約枠0・空き枠0）にスクレイパーが付けるラベル。ダミー/架空人物の可能性が高く、`closed`（受付終了相当）に分類される。ステータス文言がない限り `sold_out` にはならない（ダミー対策）
 - **「TELのみ」= `dummy`**: タイムテーブルのセルが全て `TEL`（電話のみ＝オンライン予約枠なし）のキャスト。`status_norm` は **`dummy`**（`available`/`closed` にはしない）。`slot_pattern` は `全Nコマ TEL (電話のみ)`。サイト文言がある場合も `文言 / TELのみ` にして `dummy`（完売文言があれば `sold_out` 優先）。列は `td[data-idx]=cast_id` で縦に紐付ける

@@ -444,6 +444,12 @@ class EstamaScraper:
                 return "low" if circles <= 2 else "available"
             if crosses == 0 and circles == 0:
                 return "closed"
+            if crosses > 0 and circles == 0:
+                # No site text, every slot crossed: the caller labels the
+                # row '全コマ×(事前予約不可/おとり候補)' - unbookable and a
+                # likely decoy, never a real bookable state. 'unknown'
+                # used to leak into counts/finals.
+                return "dummy"
             return "unknown"
 
         # --- FUTURE DAYS (days_offset >= 1) ---
@@ -641,6 +647,8 @@ def import_into_db(data, db_path=DEFAULT_DB):
 
 def _speed_rank_badge(first_time):
     """Return the sold-out speed badge for a first observed time."""
+    if not first_time:
+        return f"{COLOR_DIM}【判定不可】{COLOR_RESET}"
     if first_time < "06:00":
         return f"{COLOR_MAGENTA}【深夜完売 🌙】{COLOR_RESET}"
     if first_time <= "12:00":
@@ -659,22 +667,34 @@ def show_speed_ranking(date_str=None, db_path=DEFAULT_DB, shop_id=DEFAULT_SHOP_I
     cur = conn.cursor()
 
     # Query earliest sold-out time for each cast on target date.
-    # Chronology comes from fetched_at (full timestamp); legacy rows fall back
-    # to fetched_time when the full timestamp is absent:
-    # fetched_time alone orders 00-05 (next calendar day, same
-    # target_date) before 10:xx, which reported a 13:33 sold-out as
-    # "00:33". Display keeps the HH:MM part.
+    # `k` is a row-level sort key: full fetched_at when present (orders
+    # 00-05 next-calendar-day checkpoints of the same target_date
+    # correctly), an HH:MM-only fallback for legacy rows (day unknown,
+    # rank behind full-timestamp rows). The old MIN(fetched_time)
+    # comparison reported a 13:33 sold-out as "00:33" (21 real cases).
+    # Grouped by cast_id (TEXT-cast, name fallback): a renamed cast
+    # (one id, two names) appears once; name / shift / work_hours all
+    # come from the latest sold-out observation so they stay consistent.
     query = """
-    SELECT 
-        cast_name,
-        COALESCE(substr(MIN(fetched_at), 12, 5), MIN(fetched_time)) as first_sold_out_time,
-        COUNT(*) as total_records,
-        MAX(shift) as shift,
-        MAX(work_hours) as work_hours
-    FROM snapshots
-    WHERE target_date = ? AND shop_id = ? AND status_norm = 'sold_out'
-    GROUP BY cast_name
-    ORDER BY COALESCE(MIN(fetched_at), MIN(fetched_time), ''), work_hours DESC
+    WITH so AS (
+      SELECT CAST(COALESCE(cast_id, cast_name) AS TEXT) AS g,
+             COALESCE(fetched_at, '9999-12-31 ' || IFNULL(fetched_time, '00:00')) AS k,
+             cast_name, shift, work_hours, snapshot_id
+      FROM snapshots
+      WHERE target_date = ? AND shop_id = ? AND status_norm = 'sold_out'
+    )
+    SELECT
+        (SELECT s2.cast_name FROM so s2 WHERE s2.g = so.g
+          ORDER BY s2.k DESC, s2.snapshot_id DESC LIMIT 1) AS cast_name,
+        substr(MIN(so.k), 12, 5) AS first_sold_out_time,
+        COUNT(*) AS total_records,
+        (SELECT s2.shift FROM so s2 WHERE s2.g = so.g
+          ORDER BY s2.k DESC, s2.snapshot_id DESC LIMIT 1) AS shift,
+        (SELECT s2.work_hours FROM so s2 WHERE s2.g = so.g
+          ORDER BY s2.k DESC, s2.snapshot_id DESC LIMIT 1) AS work_hours
+    FROM so
+    GROUP BY so.g
+    ORDER BY MIN(so.k), work_hours DESC
     """
     cur.execute(query, (date_str, shop_id))
     sold_out_rows = cur.fetchall()
@@ -716,26 +736,35 @@ def show_speed_ranking(date_str=None, db_path=DEFAULT_DB, shop_id=DEFAULT_SHOP_I
         print("\n" + "-" * 75)
         print(f"{COLOR_BOLD}📈 時系列タイムライン（各チェックポイントでの推移）{COLOR_RESET}")
         print("-" * 75)
-        # Fetch status matrix
+        # Fetch status matrix keyed by cast id (TEXT-cast, name
+        # fallback); rendered in cast-name order, name = latest
+        # observation (renames don't split one cast into two rows).
+        # Rows without a checkpoint time are skipped (none in prod;
+        # keeps recorded_times formatting crash-free).
         cur.execute(
             """
-            SELECT cast_name, fetched_time, status_norm
+            SELECT CAST(COALESCE(cast_id, cast_name) AS TEXT) AS ck,
+                   cast_name, fetched_time, status_norm
             FROM snapshots
             WHERE target_date = ? AND shop_id = ?
-            ORDER BY cast_name, fetched_at, snapshot_id
+            ORDER BY ck, fetched_at, snapshot_id
             """,
             (date_str, shop_id)
         )
         matrix = {}
-        for cname, ftime, norm in cur.fetchall():
-            if cname not in matrix:
-                matrix[cname] = {}
-            matrix[cname][ftime] = norm
+        mnames = {}
+        for ck, cname, ftime, norm in cur.fetchall():
+            if ftime is None or ftime == "":
+                continue
+            mnames[ck] = cname  # last row wins = newest name
+            matrix.setdefault(ck, {})[ftime] = norm
 
         header = f"  {'キャスト名':<12} " + " ".join([f"{t:>6}" for t in recorded_times])
         print(COLOR_DIM + header + COLOR_RESET)
 
-        for cname, tdict in matrix.items():
+        for ck in sorted(matrix, key=lambda k: mnames[k]):
+            cname = mnames[ck]
+            tdict = matrix[ck]
             row_items = []
             for t in recorded_times:
                 st = tdict.get(t, "-")

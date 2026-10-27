@@ -47,10 +47,13 @@ slot_cases = [
     ("時間のみ", 3, 0, 0, "available"),   # unmapped text falls through to slots
     ("時間のみ", 2, 0, 0, "low"),
     ("時間のみ", 0, 0, 0, "closed"),
-    ("時間のみ", 0, 5, 0, "unknown"),
+    # today, no bookable slots, all crossed = unbookable/decoy -> dummy
+    # (2026-10-27 fix: used to leak 'unknown' into counts/finals)
+    ("時間のみ", 0, 5, 0, "dummy"),
+    (None, 0, 5, 0, "dummy"),
     ("ご好評につき本日完売", 0, 9, 1, "unknown"),  # future day: NEVER sold_out
     (None, 3, 0, 1, "available"),
-    (None, 0, 4, 1, "unknown"),
+    (None, 0, 4, 1, "unknown"),   # future all-crossed stays unknown (no real status)
     (None, 0, 0, 1, "closed"),
 ]
 for raw, c, x, off, want in slot_cases:
@@ -101,6 +104,22 @@ if dummy:
     check("ダミー shift kept", dummy["shift"] == "12:00～26:00")
     # vertical data-idx: TEL must land on 222, not shift columns
     check("ダミー no false circles", dummy["slots_summary"]["open_circles"] == 0)
+
+# --- parse_clock: shift time comparison helper (common.py) ---
+from common import parse_clock  # noqa: E402
+
+clock_cases = [
+    ("9:00", 540), ("09:00", 540), ("23:00", 1380),
+    ("24:00", 1440), ("29:00", 1740),  # over-hours end-of-shift forms
+    (None, None), ("", None), ("abc", None), ("9:00:00", None),
+    ("9:99", None), ("-1:00", None), ("1:-30", None),  # malformed rejected
+]
+for raw, want in clock_cases:
+    check(f"parse_clock {raw!r} -> {want}", parse_clock(raw) == want)
+check("parse_clock fixes string trap ('9:00' < '23:00')",
+      parse_clock("9:00") < parse_clock("23:00"))
+check("parse_clock: 29:00 is later than 23:00 (midnight-cross shift)",
+      parse_clock("29:00") > parse_clock("23:00"))
 
 print("\nRESULT:", "ALL PASS" if not fails else f"FAILURES: {fails}")
 sys.exit(1 if fails else 0)

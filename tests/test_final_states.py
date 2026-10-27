@@ -33,14 +33,15 @@ def fresh():
     return conn
 
 
-def add(conn, cast, date, time, norm, fetched_at=None):
+def add(conn, cast, date, time, norm, fetched_at=None, cast_id=None):
     """Insert one checkpoint. fetched_at format mirrors production."""
     if fetched_at is None and time:
         fetched_at = f"2026-10-26 {time}:00 JST"
     conn.execute(
-        "INSERT INTO snapshots (shop_id, cast_name, status_raw, status_norm,"
-        " target_date, fetched_time, fetched_at) VALUES (1, ?, ?, ?, ?, ?, ?)",
-        (cast, norm, norm, date, time, fetched_at),
+        "INSERT INTO snapshots (shop_id, cast_name, cast_id, status_raw,"
+        " status_norm, target_date, fetched_time, fetched_at)"
+        " VALUES (1, ?, ?, ?, ?, ?, ?, ?)",
+        (cast, cast_id, norm, norm, date, time, fetched_at),
     )
 
 
@@ -127,6 +128,49 @@ add(c, "J", "2026-10-26", "23:59", "closed")
 alerts, _ = usually_sold_out_alert(c, "2026-10-26", min_days=3)
 check("alert target uses effective state (sold_out -> no alert)",
       alerts == [])
+
+# 10. renamed cast: one cast_id, two names -> ONE person in counts (920 rule)
+c = fresh()
+add(c, "旧名", "2026-10-26", "10:00", "available", cast_id=953092)
+add(c, "新名", "2026-10-26", "12:00", "sold_out", cast_id=953092)
+add(c, "新名", "2026-10-26", "23:59", "closed", cast_id=953092)
+rows = final_rows(c, "2026-10-26")
+check("rename merges into one final row (cast_id key)",
+      len(rows) == 1 and rows[0][3] == "sold_out")
+check("status_counts denominator = distinct cast_id",
+      dict(status_counts(c, "2026-10-26")) == {"sold_out": 1})
+
+# 11. alert survives a rename: history (old name) + target (new name)
+#     on the same cast_id still match as one cast
+c = fresh()
+for d in ("2026-10-23", "2026-10-24", "2026-10-25"):
+    add(c, "旧名", d, "12:00", "sold_out", cast_id=55)
+add(c, "新名", "2026-10-26", "12:00", "available", cast_id=55)
+alerts, considered = usually_sold_out_alert(c, "2026-10-26", min_days=3)
+check("alert joins history/target across rename (1 cast)",
+      len(alerts) == 1 and considered == 1 and alerts[0][1] == "新名")
+
+# 12. migration: legacy '全コマ×' unknown rows are reclassified to dummy
+import tempfile  # noqa: E402
+from common import connect_db  # noqa: E402
+
+tmp = Path(tempfile.mkdtemp(prefix="estama-migrate-")) / "m.db"
+conn = connect_db(str(tmp))
+conn.execute("INSERT INTO shops VALUES (1, 'テスト店', '梅田', NULL, NULL)")
+conn.execute(
+    "INSERT INTO snapshots (shop_id, cast_name, status_raw, status_norm,"
+    " target_date, fetched_time) VALUES (1, 'おとり',"
+    " '全コマ×(事前予約不可/おとり候補)', 'unknown', '2026-10-27', '12:00')"
+)
+conn.commit()
+conn.close()
+conn = connect_db(str(tmp))  # re-open: migration runs
+val = conn.execute(
+    "SELECT status_norm FROM snapshots WHERE cast_name='おとり'"
+).fetchone()[0]
+conn.close()
+check("migration reclassifies legacy 全コマ× unknown -> dummy",
+      val == "dummy")
 
 print("\nRESULT:", "ALL PASS" if not fails else f"FAILURES: {fails}")
 sys.exit(1 if fails else 0)

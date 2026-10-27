@@ -71,7 +71,45 @@ def connect_db(db_path=None, apply_schema: bool = True) -> sqlite3.Connection:
     if apply_schema and SCHEMA_PATH.exists():
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         _migrate_status_norm_dummy(conn)
+        _migrate_reclassify_decoy(conn)
     return conn
+
+
+def _migrate_reclassify_decoy(conn) -> None:
+    """Re-label legacy '全コマ×(事前予約不可/おとり候補)' rows as dummy.
+
+    They were stored as 'unknown' (2026-10-27 rows) before the scraper
+    learned that no-text + all-crossed = unbookable/decoy. Pure
+    re-classification of the same raw text; idempotent.
+    """
+    conn.execute(
+        """UPDATE snapshots SET status_norm = 'dummy'
+           WHERE status_norm = 'unknown'
+             AND status_raw = '全コマ×(事前予約不可/おとり候補)'"""
+    )
+    conn.commit()
+
+
+def parse_clock(hhmm):
+    """Parse 'H:MM'/'HH:MM' (+24h+ over-hours forms) to minutes.
+
+    '9:00' -> 540, '09:00' -> 540, '24:00' -> 1440, '29:00' -> 1740.
+    String comparison of raw shift values is wrong ('9:00' > '23:00'
+    lexicographically); compare parse_clock() ints instead.
+    Returns None for None/empty/malformed input.
+    """
+    if not hhmm:
+        return None
+    parts = str(hhmm).strip().split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        hour, minute = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if hour < 0 or not 0 <= minute <= 59:
+        return None  # negative / '9:99'-style minutes are malformed
+    return hour * 60 + minute
 
 
 def _migrate_status_norm_dummy(conn) -> None:

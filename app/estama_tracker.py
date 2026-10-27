@@ -56,7 +56,10 @@ def normalize_status(raw):
 # order == chronological across midnight). fetched_time alone would be
 # wrong across midnight (05:34 < 23:37) and snapshot_id is the tiebreak
 # for rows with no timestamps (demo inserts).
-_FINAL_PARTITION = "shop_id, cast_name, target_date"
+# rows with no cast_id fall back to the name (demo/legacy rows);
+# CAST(... AS TEXT) so an int cast_id and its text form can never
+# split into two partitions.
+_FINAL_PARTITION = "shop_id, CAST(COALESCE(cast_id, cast_name) AS TEXT), target_date"
 
 
 def _final_window(partition: str = _FINAL_PARTITION) -> str:
@@ -70,17 +73,23 @@ def _final_window(partition: str = _FINAL_PARTITION) -> str:
 
 
 def _final_sql(where: str) -> str:
-    """SELECT of R3 effective final rows; rn_eff=1 per partition."""
+    """SELECT of R3 effective final rows; rn_eff=1 per partition.
+
+    cast_id is returned (appended) so callers can group/alert by the
+    stable id: a renamed cast (one cast_id, two names) must not split
+    into two people. Rows without cast_id group by name (COALESCE in
+    _FINAL_PARTITION)."""
     return f"""
         WITH ranked AS (
-          SELECT shop_id, cast_name, target_date, status_norm, status_raw,
-                 shift, work_hours, fetched_at, fetched_time, snapshot_id,
+          SELECT shop_id, cast_name, cast_id, target_date, status_norm,
+                 status_raw, shift, work_hours, fetched_at, fetched_time,
+                 snapshot_id,
                  ROW_NUMBER() OVER {_final_window()} AS rn_eff
           FROM snapshots
           WHERE {where}
         )
         SELECT shop_id, cast_name, target_date, status_norm, status_raw,
-               shift, work_hours
+               shift, work_hours, cast_id
         FROM ranked WHERE rn_eff = 1
     """
 
@@ -89,7 +98,8 @@ def final_rows(conn: sqlite3.Connection, date: str):
     """R3 effective final state per cast for target_date (analysis-time).
 
     Returns (shop_id, cast_name, target_date, status_norm, status_raw,
-    shift, work_hours) - one row per cast. Never writes to the DB.
+    shift, work_hours, cast_id) - one row per cast (grouped by
+    cast_id, name fallback). Never writes to the DB.
     """
     return conn.execute(
         _final_sql("target_date = ?"),
@@ -225,17 +235,17 @@ def usually_sold_out_alert(conn, target_date, min_days=3, threshold=0.7):
     history = conn.execute(
         f"""
         WITH final AS ({_final_sql('target_date < ?')})
-        SELECT shop_id, cast_name,
+        SELECT shop_id, CAST(COALESCE(cast_id, cast_name) AS TEXT) AS ckey,
                COUNT(*) AS n_days,
                SUM(CASE WHEN status_norm = 'sold_out' THEN 1 ELSE 0 END) AS n_sold_days
         FROM final
-        GROUP BY shop_id, cast_name HAVING COUNT(*) >= ?""",
+        GROUP BY shop_id, ckey HAVING COUNT(*) >= ?""",
         (target_date, min_days),
     ).fetchall()
     considered = len(history)
     usually = {
-        (shop_id, cast): (n, n_sold)
-        for shop_id, cast, n, n_sold in history
+        (shop_id, ckey): (n, n_sold)
+        for shop_id, ckey, n, n_sold in history
         if n and (n_sold / n) >= threshold
     }
     alerts = []
@@ -244,14 +254,15 @@ def usually_sold_out_alert(conn, target_date, min_days=3, threshold=0.7):
             f"""
             WITH final AS ({_final_sql('target_date = ?')})
             SELECT f.shop_id, s.name AS shop_name, f.cast_name,
-                   f.status_norm, f.status_raw
+                   f.status_norm, f.status_raw,
+                   CAST(COALESCE(f.cast_id, f.cast_name) AS TEXT) AS ckey
             FROM final f JOIN shops s ON s.shop_id = f.shop_id
             WHERE f.status_norm IN ('available', 'low')""",
             (target_date,),
         ).fetchall()
-        for shop_id, shop_name, cast, norm, raw in rows:
-            if (shop_id, cast) in usually:
-                n, n_sold = usually[(shop_id, cast)]
+        for shop_id, shop_name, cast, norm, raw, ckey in rows:
+            if (shop_id, ckey) in usually:
+                n, n_sold = usually[(shop_id, ckey)]
                 alerts.append((shop_name, cast, norm, raw, n_sold, n,
                                round(n_sold / n, 2)))
     alerts.sort()
