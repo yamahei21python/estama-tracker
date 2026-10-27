@@ -548,6 +548,24 @@
       "name": "MADAM JEWEL",
       "area": "堺・堺東・我孫子",
       "source_url": "https://estama.jp/shop/34831/schedule/"
+    },
+    {
+      "shop_id": 48155,
+      "name": "ホワイト　マンション型",
+      "area": "京橋・南森町・天満",
+      "source_url": "https://estama.jp/shop/48155/schedule/"
+    },
+    {
+      "shop_id": 43375,
+      "name": "ロイヤルマダム",
+      "area": "堺・堺東・我孫子",
+      "source_url": "https://estama.jp/shop/43375/schedule/"
+    },
+    {
+      "shop_id": 47358,
+      "name": "旋律",
+      "area": "その他大阪府",
+      "source_url": "https://estama.jp/shop/47358/schedule/"
     }
   ],
   "status": "CONFIGURED",
