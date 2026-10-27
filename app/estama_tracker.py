@@ -40,6 +40,63 @@ def normalize_status(raw):
     return normalize_status_text(raw)
 
 
+# R3 effective final state, analysis-time only (DB rows stay raw).
+#
+# The site resets every cast to 'closed' at end of shift / at the
+# shop-wide closing flip (e.g. FROGSPA 01:33-05:31 all closed). Counting
+# that last row would report almost everyone 'closed'. Rule R3: if the
+# latest observation of a cast-day is 'closed', walk back to the LATEST
+# non-closed observation of that day; if the whole day is closed, the
+# effective state stays 'closed'.
+#
+# One window pass does both steps: sort closed rows last (0/1 key), then
+# newest first - rn_eff=1 is the last non-closed row if one exists,
+# otherwise the newest row (closed). Chronology uses the full fetched_at
+# timestamp ('YYYY-MM-DD HH:MM:SS JST' - every row has it; lexicographic
+# order == chronological across midnight). fetched_time alone would be
+# wrong across midnight (05:34 < 23:37) and snapshot_id is the tiebreak
+# for rows with no timestamps (demo inserts).
+_FINAL_PARTITION = "shop_id, cast_name, target_date"
+
+
+def _final_window(partition: str = _FINAL_PARTITION) -> str:
+    """Return the R3 ranking window for one cast-day."""
+    return f"""(
+      PARTITION BY {partition}
+      ORDER BY (status_norm = 'closed'),
+               COALESCE(fetched_at, fetched_time, '') DESC,
+               snapshot_id DESC
+    )"""
+
+
+def _final_sql(where: str) -> str:
+    """SELECT of R3 effective final rows; rn_eff=1 per partition."""
+    return f"""
+        WITH ranked AS (
+          SELECT shop_id, cast_name, target_date, status_norm, status_raw,
+                 shift, work_hours, fetched_at, fetched_time, snapshot_id,
+                 ROW_NUMBER() OVER {_final_window()} AS rn_eff
+          FROM snapshots
+          WHERE {where}
+        )
+        SELECT shop_id, cast_name, target_date, status_norm, status_raw,
+               shift, work_hours
+        FROM ranked WHERE rn_eff = 1
+    """
+
+
+def final_rows(conn: sqlite3.Connection, date: str):
+    """R3 effective final state per cast for target_date (analysis-time).
+
+    Returns (shop_id, cast_name, target_date, status_norm, status_raw,
+    shift, work_hours) - one row per cast. Never writes to the DB.
+    """
+    return conn.execute(
+        _final_sql("target_date = ?"),
+        (date,),
+    ).fetchall()
+
+
 def connect(db_path):
     return connect_db(db_path)
 
@@ -117,19 +174,26 @@ def load_snapshot(conn, snapshot_path, watchlist_ids=None):
 
 
 def sold_out(conn, date):
-    return conn.execute(
-        """SELECT s.name, sn.cast_name, sn.shift, sn.status_raw
-           FROM snapshots sn JOIN shops s ON s.shop_id = sn.shop_id
-           WHERE sn.target_date = ? AND sn.status_norm = 'sold_out'
-           ORDER BY s.name, sn.cast_name""",
+    """Casts whose R3 effective final state is sold_out (analysis-time)."""
+    rows = conn.execute(
+        f"""
+        WITH final AS ({_final_sql('target_date = ?')})
+        SELECT s.name, f.cast_name, f.shift, f.status_raw
+        FROM final f JOIN shops s ON s.shop_id = f.shop_id
+        WHERE f.status_norm = 'sold_out'
+        ORDER BY s.name, f.cast_name""",
         (date,),
     ).fetchall()
+    return rows
 
 
 def status_counts(conn, date):
+    """Counts of R3 effective final states (one vote per cast)."""
     return conn.execute(
-        """SELECT status_norm, COUNT(*) FROM snapshots
-           WHERE target_date = ? GROUP BY status_norm ORDER BY status_norm""",
+        f"""
+        WITH final AS ({_final_sql('target_date = ?')})
+        SELECT status_norm, COUNT(*) FROM final
+        GROUP BY status_norm ORDER BY status_norm""",
         (date,),
     ).fetchall()
 
@@ -149,29 +213,23 @@ def usually_sold_out_alert(conn, target_date, min_days=3, threshold=0.7):
     """Casts usually sold out but available/low on the target date.
 
     History is counted in DAYS, not snapshot rows: a cast's status for
-    a day is the status of that day's LATEST observation (by
-    fetched_time, then snapshot_id), so intraday checkpoints can no
-    longer inflate the history (the pre-2026-10-26 code counted rows
-    and fired on 3 checkpoints of a single day). A cast qualifies
+    a day is that day's R3 EFFECTIVE final state (latest observation,
+    walking back over the end-of-day closed reset - see _final_sql).
+    So end-of-shift 'closed' no longer hides a sold-out day, and
+    intraday checkpoints can never inflate the history. A cast qualifies
     when it was observed on >= min_days distinct days before the
     target date, its sold_out rate over those DAYS is >= threshold,
-    and its target-date day status is 'available' or 'low'.
+    and its target-date effective state is 'available' or 'low'.
     Returns (alerts, history_casts_considered).
     """
     history = conn.execute(
-        """WITH daily AS (
-             SELECT shop_id, cast_name, target_date, status_norm,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY shop_id, cast_name, target_date
-                        ORDER BY fetched_time DESC, snapshot_id DESC
-                    ) AS rn
-             FROM snapshots WHERE target_date < ?
-           )
-           SELECT shop_id, cast_name,
-                  COUNT(*) AS n_days,
-                  SUM(CASE WHEN status_norm = 'sold_out' THEN 1 ELSE 0 END) AS n_sold_days
-           FROM daily WHERE rn = 1
-           GROUP BY shop_id, cast_name HAVING COUNT(*) >= ?""",
+        f"""
+        WITH final AS ({_final_sql('target_date < ?')})
+        SELECT shop_id, cast_name,
+               COUNT(*) AS n_days,
+               SUM(CASE WHEN status_norm = 'sold_out' THEN 1 ELSE 0 END) AS n_sold_days
+        FROM final
+        GROUP BY shop_id, cast_name HAVING COUNT(*) >= ?""",
         (target_date, min_days),
     ).fetchall()
     considered = len(history)
@@ -183,18 +241,12 @@ def usually_sold_out_alert(conn, target_date, min_days=3, threshold=0.7):
     alerts = []
     if usually:
         rows = conn.execute(
-            """WITH daily AS (
-                 SELECT sn.shop_id, s.name AS shop_name, sn.cast_name,
-                        sn.status_norm, sn.status_raw,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY sn.shop_id, sn.cast_name, sn.target_date
-                            ORDER BY sn.fetched_time DESC, sn.snapshot_id DESC
-                        ) AS rn
-                 FROM snapshots sn JOIN shops s ON s.shop_id = sn.shop_id
-                 WHERE sn.target_date = ?
-               )
-               SELECT shop_id, shop_name, cast_name, status_norm, status_raw
-               FROM daily WHERE rn = 1 AND status_norm IN ('available', 'low')""",
+            f"""
+            WITH final AS ({_final_sql('target_date = ?')})
+            SELECT f.shop_id, s.name AS shop_name, f.cast_name,
+                   f.status_norm, f.status_raw
+            FROM final f JOIN shops s ON s.shop_id = f.shop_id
+            WHERE f.status_norm IN ('available', 'low')""",
             (target_date,),
         ).fetchall()
         for shop_id, shop_name, cast, norm, raw in rows:

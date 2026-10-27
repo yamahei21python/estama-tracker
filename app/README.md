@@ -66,6 +66,7 @@ python3 -m venv venv
 
 ```bash
 python3 tests/test_tracker_alert.py   # アラートの日次集計（標準ライブラリのみ）
+python3 tests/test_final_states.py    # R3 最終状態（分析時のみ反転、DB非改変）
 python3 tests/test_runner.py          # ロック・検証・アーカイブ・アップロード
 python3 tests/test_prune.py           # 出禁ルール
 ./venv/bin/python tests/test_normalize.py  # ステータス正規化の真理表
@@ -78,6 +79,7 @@ python3 tests/test_prune.py           # 出禁ルール
 - **完売の判定はステータス文言からのみ**行う。枠の ○/×/─ は使わない（未来日のダミー対策）
 - **シフト表示は完売・受付終了になるとサイト側で消える**。その場合の `work_hours` は枠からの推定値で、実シフトより短く潰れる（完売組の平均約2.5h）。勤務時間の分析では推定値を実シフトと混同しないこと
 - **アラートの履歴は「日数」で数える**。1日の状態はその日の最終観測で代表させる。チェックポイントの回数で水増しはしない
+- **最終状態は分析時にのみ R3 反転する**（`final_rows` / `counts` / `sold-out` / `alert` 経由）。サイトは終業時に全キャストを `closed` へリセットする（店全体フリップは退勤後30分前後、個人終業は shift_end+30分前後）ため、最終観測が `closed` の場合は**その日の最後の non-closed 観測を最終状態とする**（終日 closed なら closed のまま）。DB 行は生のまま。終業時刻の分析は `status_raw` / `shift_end` の生データを使う。日跨ぎの時系列は `fetched_at`（`YYYY-MM-DD HH:MM:SS JST`）順で判定する（`fetched_time` 単独は 00-05 時台が誤順になる）
 - `shops.json` の `area` は情報項目で、ロジックは参照しない（初期店は店舗の地域、ランキング同期で追加された店はランキングのエリア名が入る）
 - **「時間のみ」ステータス**: サイト側がステータス文言を設定していないキャスト（予約枠0・空き枠0）にスクレイパーが付けるラベル。ダミー/架空人物の可能性が高く、`closed`（受付終了相当）に分類される。ステータス文言がない限り `sold_out` にはならない（ダミー対策）
 - **「TELのみ」= `dummy`**: タイムテーブルのセルが全て `TEL`（電話のみ＝オンライン予約枠なし）のキャスト。`status_norm` は **`dummy`**（`available`/`closed` にはしない）。`slot_pattern` は `全Nコマ TEL (電話のみ)`。サイト文言がある場合も `文言 / TELのみ` にして `dummy`（完売文言があれば `sold_out` 優先）。列は `td[data-idx]=cast_id` で縦に紐付ける
