@@ -701,10 +701,12 @@ def show_speed_ranking(date_str=None, db_path=DEFAULT_DB, shop_id=DEFAULT_SHOP_I
 
     # Query all active checkpoints on that date, in real chronological
     # order (fetched_at across midnight, not fetched_time string order)
+    # Checkpoint column order = row-level time key (same rule as the
+    # rank query: full fetched_at, legacy HH:MM ranked behind)
     cur.execute(
         "SELECT fetched_time FROM snapshots WHERE target_date = ? AND shop_id = ? "
         "GROUP BY fetched_time "
-        "ORDER BY COALESCE(MIN(fetched_at), MIN(fetched_time), '')",
+        "ORDER BY MIN(COALESCE(fetched_at, '9999-12-31 ' || IFNULL(fetched_time, '00:00')))",
         (date_str, shop_id)
     )
     recorded_times = [r[0] for r in cur.fetchall()]
