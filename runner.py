@@ -640,20 +640,25 @@ def main() -> int:
     try:
         detail = {"checkpoint": job_checkpoint, "ranking": job_ranking,
                   "prune": job_prune}[job]()
-        run_log_close(run_id, "ok", detail)
     except Exception as exc:  # report, never crash the schedule silently
         log(f"FAIL {job}: {type(exc).__name__}: {exc}")
         run_log_close(run_id, "fail", f"{type(exc).__name__}: {exc}")
-        publish()  # the published DB must carry the 'fail' row too
+        # no publish: job_checkpoint's 'no new rows' rejection is also an
+        # upload guard - a failed job must not replace the shared DB
         return 1
-    # publish only AFTER run_log_close: the distributed DB's newest
-    # run_log row must show the final status, not a stale 'running'
-    # (section_runlog flags running rows older than 2h as suspected
-    # runner death - a stale 'running' would false-positive)
-    try:
-        publish()
-    except Exception as exc:
-        log(f"publish failed after ok: {type(exc).__name__}: {exc}")
+    run_log_close(run_id, "ok", detail)
+    # publish only AFTER run_log_close and only for jobs that ship
+    # artifacts: the distributed DB's newest run row must show the
+    # final status, not a stale 'running' (section_runlog flags a
+    # running row older than 2h as suspected runner death)
+    if job in ("checkpoint", "ranking"):
+        try:
+            publish()
+        except Exception as exc:  # upload failed - record it, don't
+            # pretend the job fully succeeded
+            log(f"publish failed after ok: {type(exc).__name__}: {exc}")
+            run_log_mark(job, "fail",
+                         f"publish failed: {type(exc).__name__}: {exc}")
     log(f"DONE {job}")
     return 0
 

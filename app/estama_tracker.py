@@ -737,9 +737,12 @@ def section_rank_moves(conn, period_type="weekly", min_delta=5, limit=15):
          if abs(prev[c][0] - now[c][0]) >= min_delta),
         key=lambda x: x[0])
     # risers and fallers each get a share of the limit so a day of many
-    # drops can't crowd every riser out of the report
-    ups = [m for m in moved if m[0] > 0][:limit // 2]
-    downs = [m for m in moved if m[0] < 0][:limit - len(ups)]
+    # drops can't crowd every riser out of the report; a side's unused
+    # slots flow to the other (two-pass: trim one, refill the other)
+    ups = [m for m in moved if m[0] > 0]
+    downs = [m for m in moved if m[0] < 0]
+    ups = ups[:max(limit // 2, limit - len(downs))]
+    downs = downs[:limit - len(ups)]
     for delta, cid, (rk, nm, shop) in ups + downs:
         lines.append(
             f"    {'↑' if delta > 0 else '↓'} {nm} ({shop[:16]}): "
@@ -1259,9 +1262,15 @@ def build_notify_text(conn, date, min_days=2, threshold=0.6, limit=8):
              if any(t in l for t in ("↑", "↓", "新規IN", "圏外OUT"))]
     if moves:
         parts.append("■ ランキング変動:")
-        parts += moves[:8]
-        if len(moves) > 8:
-            parts.append(f"  ...他 {len(moves) - 8}件")
+        # cap mover lines but always keep the IN/OUT summary lines -
+        # they sit at the tail of the section and a flat [:8] cut
+        # would silently drop them on busy days
+        movers = [l for l in moves if "↑" in l or "↓" in l]
+        keep = movers[:8] + [l for l in moves
+                             if "新規IN" in l or "圏外OUT" in l]
+        parts += keep
+        if len(movers) > 8:
+            parts.append(f"  ...他 {len(movers) - 8}件の変動")
     mom = [l for l in section_momentum(conn, date) if "勢い" in l]
     if mom:
         parts.append("■ 予約の勢い（枠消化中）:")
