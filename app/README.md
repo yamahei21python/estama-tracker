@@ -10,7 +10,7 @@
 | `app/ranking_scraper.py` | 週間人気セラピストランキング（14エリア×30人）の取得、`cast_rankings` 保存、ウォッチリスト同期（各エリア上位10位の店を `shops.json` へ追加） |
 | `app/estama_tracker.py` | 分析側。完売一覧・ステータス件数・「普段完売なのに今日空いている」アラート |
 | `app/common.py` | 共通部品（パス、UA、セッション、DB接続、JSON入出力、ステータス文言の正規化）。ここに一元化されている |
-| `app/schema.sql` | DBスキーマ（shops / snapshots / cast_rankings） |
+| `app/schema.sql` | DBスキーマ（shops / snapshots / cast_rankings / daily_cast_status / run_log） |
 | `app/shops.json` | ウォッチリスト（巡回対象の店） |
 | `app/banned_shops.json` | 出禁リスト（実行時に生成。git対象外） |
 | `runner.py` | 運用ランナー。下記の安全装置と R2 アップロードを担当 |
@@ -60,6 +60,13 @@ python3 -m venv venv
 ./venv/bin/python app/estama_tracker.py counts --date 2026-10-27
 ./venv/bin/python app/estama_tracker.py sold-out --date 2026-10-27
 ./venv/bin/python app/estama_tracker.py alert --date 2026-10-27 --min-days 3 --threshold 0.7
+
+# 日次ロールアップ再計算（runner が取り込み後に自動実行）
+./venv/bin/python app/estama_tracker.py rollup
+
+# 全セクション分析レポート（日次サマリー/ストリーク/アラート/タイミング/
+# 遷移/エリア/店舗/ランキング照合/品質/runner履歴）
+./venv/bin/python app/estama_tracker.py report --date 2026-10-28
 ```
 
 ## テスト
@@ -68,7 +75,8 @@ python3 -m venv venv
 python3 tests/test_tracker_alert.py   # アラートの日次集計（標準ライブラリのみ）
 python3 tests/test_final_states.py    # R3 最終状態（分析時のみ反転、DB非改変）
 python3 tests/test_speed_rank.py      # 完売スピードの日跨ぎ順序（fetched_at 基準）
-python3 tests/test_runner.py          # ロック・検証・アーカイブ・アップロード
+python3 tests/test_runner.py          # ロック・検証・アーカイブ・アップロード・run_log
+python3 tests/test_rollup.py          # daily_cast_status ロールアップとレポート節
 python3 tests/test_prune.py           # 出禁ルール
 ./venv/bin/python tests/test_normalize.py  # ステータス正規化の真理表
 ./venv/bin/python app/estama_tracker.py demo
@@ -85,6 +93,8 @@ python3 tests/test_prune.py           # 出禁ルール
 - **集計キーは `cast_id`**（`COALESCE(cast_id, cast_name)`）。R3 partition・alert 履歴/対象・speed-rank の group by すべて。同一 cast_id の改名（実績: 953092 が1日内で2名前）を2人に数えないため。counts の分母は `counts --date 2026-10-26` = 920（旧 921 は改名分裂の誤り）
 - **`全コマ×(事前予約不可/おとり候補)` = `dummy`**。当日で文言なし・全枠×のキャストは予約不可かつおとり候補。旧 `unknown` の14行は初回接続時の移行（`_migrate_reclassify_decoy`）で `dummy` に再分類（`status_raw` は不変）。未来日の全全枠×は従来通り `unknown`（実状態が不明なため）
 - **シフト時刻の文字列比較は禁止**。`shift_start`/`shift_end` は非ゼロ埋め（`9:00`）＋24時超表記（`29:00` = 翌5時）のため、`'9:00' > '23:00'` が文字列比較で真になる。`common.parse_clock()`（分単位 int）で比較すること。`work_hours` は既に正規計算済み
-- `shops.json` の `area` は情報項目で、ロジックは参照しない（初期店は店舗の地域、ランキング同期で追加された店はランキングのエリア名が入る）
+- `shops.json` の `area` は情報項目で、取り込みロジックは参照しない（初期店は店舗の地域、ランキング同期で追加された店はランキングのエリア名が入る）。`report` のエリア別完売率集計で使用
+- **`daily_cast_status`** … R3 で確定した「キャスト×日×最終状態」を1行に集約した日次ロールアップ（アラート履歴・トレンド・遷移分析の基盤）。`estama_tracker.py rollup` が `DELETE+INSERT` で再計算するため部分日も何度でも再取得可。runner は checkpoint/ranking 取り込み後に自動実行
+- **`run_log`** … runner ジョブの実行履歴（`ok|fail|skip`＋detail）。巡回失敗・ロック競合の監査用。`report`【10】で閲覧
 - **「時間のみ」ステータス**: サイト側がステータス文言を設定していないキャスト（予約枠0・空き枠0）にスクレイパーが付けるラベル。ダミー/架空人物の可能性が高く、`closed`（受付終了相当）に分類される。ステータス文言がない限り `sold_out` にはならない（ダミー対策）
 - **「TELのみ」= `dummy`**: タイムテーブルのセルが全て `TEL`（電話のみ＝オンライン予約枠なし）のキャスト。`status_norm` は **`dummy`**（`available`/`closed` にはしない）。`slot_pattern` は `全Nコマ TEL (電話のみ)`。サイト文言がある場合も `文言 / TELのみ` にして `dummy`（完売文言があれば `sold_out` 優先）。列は `td[data-idx]=cast_id` で縦に紐付ける

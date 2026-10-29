@@ -91,5 +91,25 @@ p = subprocess.run([sys.executable, str(ROOT / "runner.py"), "checkpoint"],
 check("overlap run exits 0 with SKIP", p.returncode == 0 and "SKIP" in p.stdout)
 holder.terminate()
 
+# run_log: the SKIP above must have been recorded in the DB
+con = sqlite3.connect(db)
+con.executescript((ROOT / "app" / "schema.sql").read_text())  # ensure run_log exists
+con.commit()
+rows = con.execute(
+    "SELECT job, status, detail FROM run_log ORDER BY run_id").fetchall()
+check("run_log records lock SKIP",
+      any(r[0] == "checkpoint" and r[1] == "skip" for r in rows))
+
+# run_log open/close lifecycle
+rid = r.run_log_open("prune")
+r.run_log_close(rid, "ok", "banned=0")
+row = con.execute(
+    "SELECT job, status, detail, finished_at FROM run_log WHERE run_id=?",
+    (rid,)).fetchone()
+check("run_log open/close lifecycle",
+      row[0] == "prune" and row[1] == "ok" and row[2] == "banned=0"
+      and row[3] is not None)
+con.close()
+
 print("\nRESULT:", "ALL PASS" if not fails else f"FAILURES: {fails}")
 sys.exit(1 if fails else 0)

@@ -402,6 +402,65 @@ def maybe_archive(now: datetime) -> str | None:
     return key
 
 
+# ---------------------------------------------------------------- run_log ---
+# One run_log row per job so scrape failures and lock skips are
+# queryable in the DB itself (not only the runner log files). Writes
+# are best-effort: a run_log failure must never break a job.
+
+def _run_ts() -> str:
+    return now_jst().strftime("%Y-%m-%d %H:%M:%S") + " JST"
+
+
+def _run_db() -> sqlite3.Connection:
+    """DB connection for run_log writes, with the schema applied.
+
+    Goes through app/common.connect_db so a pre-upgrade estama.db
+    gets the run_log / daily_cast_status tables on first touch.
+    """
+    # code lives in the repo's app/ dir; APP is the data dir (redirected
+    # by ESTAMA_VM_BASE in tests/staging)
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "app"))
+    from common import connect_db
+    return connect_db(DB)
+
+
+def run_log_open(job: str) -> int | None:
+    """Insert a running row; returns run_id (None on failure)."""
+    try:
+        con = _run_db()
+        cur = con.execute(
+            "INSERT INTO run_log (job, started_at, status)"
+            " VALUES (?, ?, 'running')",
+            (job, _run_ts()))
+        con.commit()
+        con.close()
+        return cur.lastrowid
+    except Exception as exc:
+        log(f"run_log open failed: {exc}")
+        return None
+
+
+def run_log_close(run_id: int | None, status: str, detail: str | None = None) -> None:
+    if run_id is None:
+        return
+    try:
+        con = _run_db()
+        con.execute(
+            "UPDATE run_log SET finished_at = ?, status = ?, detail = ?"
+            " WHERE run_id = ?",
+            (_run_ts(), status, detail, run_id))
+        con.commit()
+        con.close()
+    except Exception as exc:
+        log(f"run_log close failed: {exc}")
+
+
+def run_log_mark(job: str, status: str, detail: str | None = None) -> None:
+    """One-shot completed row (e.g. a lock SKIP that never ran)."""
+    run_id = run_log_open(job)
+    run_log_close(run_id, status, detail)
+
+
 # ------------------------------------------------------------------ jobs ----
 
 def run_scraper(args: list[str], timeout: int = 1800) -> None:
@@ -494,7 +553,7 @@ def enforce_ban() -> list[int]:
     return dropped
 
 
-def job_prune() -> None:
+def job_prune() -> str:
     today_bd = expected_business_date(now_jst())
     candidates = prune_candidates(DB, today_bd)
     if candidates:
@@ -503,29 +562,34 @@ def job_prune() -> None:
         storage_put("banned_shops.json", BANNED_JSON)
     else:
         log("prune: no shops qualify for a ban")
+    return f"banned={len(candidates)}"
 
 
-def job_checkpoint() -> None:
+def job_checkpoint() -> str:
     maybe_archive(now_jst())
     before = snapshot_count(DB)
     run_scraper(["estama_scraper.py", "--all-shops", "--import-db"])
+    run_scraper(["estama_tracker.py", "rollup"])  # refresh daily_cast_status
     after = snapshot_count(DB)
     log(f"checkpoint: snapshots {before} -> {after} (+{after - before})")
     if after <= before:
         raise RuntimeError("checkpoint imported no new rows - refusing to upload")
     upload_db()
+    return f"snapshots +{after - before} ({before} -> {after})"
 
 
-def job_ranking() -> None:
+def job_ranking() -> str:
     maybe_archive(now_jst())
     run_scraper(["ranking_scraper.py", "--area", "all", "--import-db",
                  "--save-json", "--sync-watchlist"], timeout=600)
+    run_scraper(["estama_tracker.py", "rollup"])  # refresh daily_cast_status
     enforce_ban()   # a sync must never resurrect a banned shop
-    job_prune()     # daily: ban shops with 20+ observed days and zero sell-outs
+    banned = job_prune()  # daily: ban shops w/ 20+ observed days, zero sell-outs
     upload_db()
     # shops.json is part of the deliverable too
     storage_put("shops.json", APP / "shops.json")
     log("ranking: shops.json uploaded")
+    return f"ranking sync done; {banned}"
 
 
 def main() -> int:
@@ -538,14 +602,18 @@ def main() -> int:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         log(f"SKIP {sys.argv[1]}: another run holds the lock")
+        run_log_mark(sys.argv[1], "skip", "another run holds the lock")
         return 0
     job = sys.argv[1]
     log(f"START {job}")
+    run_id = run_log_open(job)
     try:
-        {"checkpoint": job_checkpoint, "ranking": job_ranking,
-         "prune": job_prune}[job]()
+        detail = {"checkpoint": job_checkpoint, "ranking": job_ranking,
+                  "prune": job_prune}[job]()
+        run_log_close(run_id, "ok", detail)
     except Exception as exc:  # report, never crash the schedule silently
         log(f"FAIL {job}: {type(exc).__name__}: {exc}")
+        run_log_close(run_id, "fail", f"{type(exc).__name__}: {exc}")
         return 1
     log(f"DONE {job}")
     return 0
