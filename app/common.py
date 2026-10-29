@@ -197,6 +197,30 @@ def log_scrape(db_path, shop_id, status, rows=0, detail=None) -> None:
         pass
 
 
+def notify_webhook(text) -> bool:
+    """POST a notification to the webhook in ESTAMA_NOTIFY_WEBHOOK.
+
+    Payload carries both 'text' (Slack incoming-webhook / LINE-style
+    bots that accept a generic field) and 'content' (Discord), so one
+    URL works for Slack, Discord and most notifier endpoints. urllib
+    only, best effort: returns True on 2xx, False otherwise.
+    """
+    url = os.environ.get("ESTAMA_NOTIFY_WEBHOOK")
+    if not url:
+        return False
+    try:
+        import urllib.request
+        body = json.dumps(
+            {"text": text, "content": text}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return 200 <= resp.status < 300
+    except Exception:
+        return False
+
+
 def normalize_status_text(raw) -> str:
     """Map a therapist-level status string to a normalized status.
 

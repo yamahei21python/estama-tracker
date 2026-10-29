@@ -28,15 +28,16 @@ Usage:
 
 import argparse
 import json
+import re
 import sqlite3
 import sys
 from collections import Counter
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from common import (BASE_DIR as BASE, SCHEMA_PATH as SCHEMA,
                     SHOPS_JSON_PATH as DEFAULT_SHOPS, connect_db, load_json,
-                    normalize_status_text, now_jst)
+                    normalize_status_text, notify_webhook, now_jst)
 
 
 def normalize_status(raw):
@@ -283,13 +284,18 @@ def rollup_daily(conn, date=None):
     that, making alert history, sold-out streaks and trends a plain
     table lookup instead of a window pass. Returns rows written.
     """
-    # first_sold_out_at landed after the table shipped; upgrade old DBs
+    # first_sold_out_at / was_low landed after the table shipped;
+    # upgrade old DBs in place
     cols = {r[1] for r in conn.execute(
         "PRAGMA table_info(daily_cast_status)")}
     if "first_sold_out_at" not in cols:
         conn.execute(
             "ALTER TABLE daily_cast_status"
             " ADD COLUMN first_sold_out_at TEXT")
+    if "was_low" not in cols:
+        conn.execute(
+            "ALTER TABLE daily_cast_status"
+            " ADD COLUMN was_low INTEGER NOT NULL DEFAULT 0")
 
     if date:
         days = [date]
@@ -305,19 +311,52 @@ def rollup_daily(conn, date=None):
                FROM snapshots
                WHERE target_date = ? AND status_norm = 'sold_out'
                GROUP BY 1, 2""", (d,)).fetchall()}
+        # was_low: 'low' seen before the first sold_out, or at all on a
+        # day the cast never sold out. Both cases count as a forecast
+        # candidate for forecast_eval self-scoring.
+        low_seen = {}
+        for s, k, fa in conn.execute(
+                """SELECT shop_id,
+                          CAST(COALESCE(cast_id, cast_name) AS TEXT),
+                          MIN(fetched_at)
+                   FROM snapshots
+                   WHERE target_date = ? AND status_norm = 'low'
+                   GROUP BY 1, 2""", (d,)).fetchall():
+            so_at = first_so.get(f"{s}|{k}")
+            low_seen[f"{s}|{k}"] = so_at is None or fa < so_at
         conn.execute(
             "DELETE FROM daily_cast_status WHERE target_date = ?", (d,))
         conn.executemany(
             """INSERT INTO daily_cast_status
                (shop_id, cast_key, cast_id, cast_name, target_date,
                 status_norm, status_raw, work_hours, age, fetched_at,
-                first_sold_out_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                first_sold_out_at, was_low)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [(r[0], str(r[7] if r[7] is not None else r[1]), r[7], r[1],
               r[2], r[3], r[4], r[6], r[9], r[8],
-              first_so.get(f"{r[0]}|{r[7] if r[7] is not None else r[1]}"))
+              first_so.get(f"{r[0]}|{r[7] if r[7] is not None else r[1]}"),
+              1 if low_seen.get(
+                  f"{r[0]}|{r[7] if r[7] is not None else r[1]}") else 0)
              for r in rows],
         )
+        # forecast self-score: of the day's was_low casts, how many sold
+        # out (any prior-day history requirement stays in the report;
+        # here we score the raw signal so the trend is comparable)
+        cand = sum(1 for r in rows if low_seen.get(
+            f"{r[0]}|{r[7] if r[7] is not None else r[1]}"))
+        hits = sum(1 for r in rows
+                   if r[3] == "sold_out" and low_seen.get(
+                       f"{r[0]}|{r[7] if r[7] is not None else r[1]}"))
+        conn.execute(
+            """INSERT INTO forecast_eval
+               (target_date, candidates, hits, evaluated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(target_date) DO UPDATE SET
+                 candidates = excluded.candidates,
+                 hits = excluded.hits,
+                 evaluated_at = excluded.evaluated_at""",
+            (d, cand, hits,
+             now_jst().strftime("%Y-%m-%d %H:%M:%S") + " JST"))
         total += len(rows)
     conn.commit()
     return total
@@ -643,6 +682,290 @@ def section_forecast(conn, date, min_days=2, limit=20):
             f" (過去完売 {so}/{n}日, {rate:.0%})")
     if not cands:
         lines.append(f"  (履歴{min_days}日以上かつ現在 low のcastなし)")
+
+    # self-scoring trend written by rollup into forecast_eval
+    try:
+        ev = conn.execute(
+            """SELECT target_date, candidates, hits FROM forecast_eval
+               ORDER BY target_date""").fetchall()
+    except sqlite3.OperationalError:
+        ev = []
+    if ev:
+        tc = sum(r[1] for r in ev)
+        th = sum(r[2] for r in ev)
+        lines.append(
+            f"  採点: low→完売 的中 {th}/{tc} "
+            f"({th / tc * 100:.0f}%)" if tc else "  採点データなし")
+        for d, c, h in ev[-5:]:
+            lines.append(
+                f"    {d}: {h}/{c}"
+                + (f" ({h / c * 100:.0f}%)" if c else ""))
+    return lines
+
+
+def section_rank_moves(conn, period_type="weekly", min_delta=5, limit=15):
+    """Rank movement between the two latest ranking snapshots.
+
+    Uses area 2700 (Osaka overall) - per-area boards duplicate the
+    same casts and would report the same move up to 14 times.
+    'New' = entered top-30 since the previous fetch, 'out' = dropped.
+    """
+    try:
+        dates = [r[0] for r in conn.execute(
+            """SELECT DISTINCT fetched_date FROM cast_rankings
+               WHERE area_code = '2700' AND period_type = ?
+               ORDER BY fetched_date DESC LIMIT 2""",
+            (period_type,)).fetchall()]
+    except sqlite3.OperationalError:
+        dates = []
+    if len(dates) < 2:
+        return ["  (比較可能なランキングスナップが2日分未満)"]
+    new_d, old_d = dates
+
+    def ranks(d):
+        return {r[0]: (r[1], r[2], r[3]) for r in conn.execute(
+            """SELECT cast_id, rank, cast_name, shop_name
+               FROM cast_rankings
+               WHERE area_code = '2700' AND period_type = ?
+                 AND fetched_date = ?""",
+            (period_type, d)).fetchall()}
+
+    now, prev = ranks(new_d), ranks(old_d)
+    lines = [f"  {old_d} -> {new_d} 変動:"]
+    moved = sorted(
+        ((prev[c][0] - now[c][0], c, now[c]) for c in now.keys() & prev.keys()
+         if abs(prev[c][0] - now[c][0]) >= min_delta),
+        key=lambda x: x[0])
+    # risers and fallers each get a share of the limit so a day of many
+    # drops can't crowd every riser out of the report
+    ups = [m for m in moved if m[0] > 0][:limit // 2]
+    downs = [m for m in moved if m[0] < 0][:limit - len(ups)]
+    for delta, cid, (rk, nm, shop) in ups + downs:
+        lines.append(
+            f"    {'↑' if delta > 0 else '↓'} {nm} ({shop[:16]}): "
+            f"{prev[cid][0]}位 -> {rk}位")
+    entered = [c for c in now.keys() - prev.keys()]
+    dropped = [c for c in prev.keys() - now.keys()]
+    if entered:
+        lines.append(f"    新規IN {len(entered)}人: "
+                     + ", ".join(now[c][1] for c in sorted(
+                         entered, key=lambda c: now[c][0])))
+    if dropped:
+        lines.append(f"    圏外OUT {len(dropped)}人: "
+                     + ", ".join(prev[c][1] for c in sorted(
+                         dropped, key=lambda c: prev[c][0])))
+    if not moved and not entered and not dropped:
+        lines.append("    変動なし")
+    return lines
+
+
+_WD = "日月火水木金土"
+
+
+def section_watch(conn, date):
+    """Favorite casts (cast_watch): today's state + weekday attendance.
+
+    Weekday tendency comes from daily_cast_status (R3 finals), so a
+    'present' day = the cast has any final row that day.
+    """
+    try:
+        watch = conn.execute(
+            """SELECT w.shop_id, w.cast_key, w.cast_name, s.name
+               FROM cast_watch w LEFT JOIN shops s USING (shop_id)
+               ORDER BY w.added_at""").fetchall()
+    except sqlite3.OperationalError:
+        watch = []
+    if not watch:
+        return ["  (cast_watch なし - 'watch add' で登録)"]
+    lines = []
+    today = {f"{r['shop_id']}|{_ckey(r)}": r for r in _day_finals(conn, date)}
+    mark = {"sold_out": "完売", "low": "残少", "available": "空き",
+            "closed": "終了", "dummy": "ダミー", "unknown": "不明"}
+    for sid, ck, cname, shop in watch:
+        r = today.get(f"{sid}|{ck}")
+        st = mark.get(r["status_norm"], r["status_norm"]) if r else "休み?"
+        extra = ""
+        if r and r["status_norm"] == "sold_out":
+            fa = conn.execute(
+                """SELECT first_sold_out_at FROM daily_cast_status
+                   WHERE shop_id = ? AND cast_key = ? AND target_date = ?""",
+                (sid, ck, date)).fetchone()
+            if fa and fa[0]:
+                extra = f" ({fa[0][11:16]}時点で初観測)"
+        # weekday attendance: share of each weekday the cast appeared
+        days = conn.execute(
+            """SELECT DISTINCT target_date FROM daily_cast_status
+               WHERE shop_id = ? AND cast_key = ?""",
+            (sid, ck)).fetchall()
+        wd = Counter()
+        for (d,) in days:
+            wd[datetime.fromisoformat(d).weekday()] += 1
+        # Python weekday(): Mon=0..Sun=6; _WD[0]=日 so map via (i+1)%7
+        wdtxt = " ".join(f"{_WD[(i + 1) % 7]}{wd.get(i, 0)}"
+                         for i in range(7) if wd.get(i, 0))
+        lines.append(f"  {shop or sid} - {cname}: 今日={st}{extra}  "
+                     f"出勤日傾向: {wdtxt or 'データなし'}")
+    return lines
+
+
+_SLOT_RE = re.compile(r"○(\d+)コマ / ×(\d+)コマ")
+
+
+def _slot_counts(slot_pattern):
+    """(open, booked) from '○Nコマ / ×Mコマ (予約可)'; None if other shape."""
+    if not slot_pattern:
+        return None
+    m = _SLOT_RE.search(slot_pattern)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def section_momentum(conn, date, min_booked=4, limit=15):
+    """Booking momentum today: casts whose × (booked slot) count grew
+    without reaching sold_out yet - the 'reservations are flowing in'
+    signal that fires before 'low' does.
+
+    booked = x_latest - x_first. When × never appears (slots vanish
+    at shift end without a × tally), fall back to o_first - o_last.
+    """
+    rows = conn.execute(
+        """SELECT shop_id, CAST(COALESCE(cast_id, cast_name) AS TEXT),
+                  MAX(cast_name), slot_pattern, fetched_at, status_norm
+           FROM snapshots WHERE target_date = ?
+           GROUP BY 1, 2, fetched_at
+           ORDER BY shop_id, cast_id, fetched_at""", (date,)).fetchall()
+    per = {}
+    for sid, ck, cname, sp, fa, norm in rows:
+        ent = per.setdefault((sid, ck), {"name": cname, "norm": norm,
+                                        "first": None, "last": None,
+                                        "fa0": fa, "fa1": fa})
+        ent["fa1"] = fa
+        ent["norm"] = norm  # last observation wins (groups keep order)
+        sc = _slot_counts(sp)
+        if sc is None:
+            continue
+        if ent["first"] is None:
+            ent["first"], ent["fa0"] = sc, fa
+        ent["last"], ent["fa1"] = sc, fa
+    names = {s: n for s, n in
+             conn.execute("SELECT shop_id, name FROM shops")}
+    # R3 final states: a cast that sold out and then flipped to 'closed'
+    # at shift end must count as sold_out, not as 'still bookable'
+    sold_out_finals = {(r["shop_id"], _ckey(r))
+                       for r in _day_finals(conn, date)
+                       if r["status_norm"] == "sold_out"}
+    cands = []
+    for (sid, ck), e in per.items():
+        if e["norm"] == "sold_out" or (sid, ck) in sold_out_finals \
+                or e["first"] is None:
+            continue
+        o0, x0 = e["first"]
+        o1, x1 = e["last"]
+        booked = x1 - x0
+        if booked <= 0:
+            booked = max(0, o0 - o1)
+        if booked < min_booked:
+            continue
+        hrs = max(0.25, (datetime.fromisoformat(
+            e["fa1"].replace(" JST", ""))
+            - datetime.fromisoformat(
+                e["fa0"].replace(" JST", ""))).total_seconds() / 3600)
+        cands.append((booked / hrs, booked, o1, sid, e["name"], e["norm"]))
+    cands.sort(key=lambda x: -x[0])
+    lines = []
+    for rate, booked, left, sid, cname, norm in cands[:limit]:
+        lines.append(
+            f"  勢い {names.get(sid, sid)} - {cname}: "
+            f"{booked}枠消化 (残{left}枠, {rate:.1f}枠/h) [{norm}]")
+    if not cands:
+        lines.append(f"  ({min_booked}枠以上の消化なし)")
+    return lines
+
+
+def section_new_casts(conn, date, transfer_days=14):
+    """New cast_ids first observed on `date` + cast_ids seen under
+    more than one shop in the recent window (possible transfers)."""
+    lines = []
+    first_seen = dict(conn.execute(
+        """SELECT CAST(COALESCE(cast_id, cast_name) AS TEXT),
+                  MIN(target_date) FROM snapshots GROUP BY 1"""))
+    # one row per (shop, cast_key); a mid-day rename must not count
+    # the same cast_id twice - keep the latest observed name
+    latest = {}
+    for sid, cname, ck in conn.execute(
+            """SELECT s.shop_id, s.cast_name,
+                      CAST(COALESCE(s.cast_id, s.cast_name) AS TEXT)
+               FROM snapshots s WHERE s.target_date = ?
+               ORDER BY s.fetched_at""", (date,)).fetchall():
+        latest[(sid, ck)] = cname
+    newc = [(sid, cname, ck) for (sid, ck), cname in latest.items()
+            if first_seen.get(ck) == date]
+    names = {s: n for s, n in
+             conn.execute("SELECT shop_id, name FROM shops")}
+    if newc:
+        lines.append(f"  新規cast（{date} 初登場）: {len(newc)}人")
+        for sid, cname, cid in sorted(newc,
+                                      key=lambda x: names.get(x[0], ""))[:15]:
+            lines.append(f"    {names.get(sid, sid)} - {cname}")
+        if len(newc) > 15:
+            lines.append(f"    ...他 {len(newc) - 15}人")
+    else:
+        lines.append(f"  新規cast: {date} の初登場なし")
+    # transfers: same cast_id under 2+ shops inside the window
+    cutoff = (datetime.fromisoformat(date)
+              - timedelta(days=transfer_days)).date().isoformat()
+    tr = conn.execute(
+        """SELECT cast_id, GROUP_CONCAT(DISTINCT shop_id),
+                  COUNT(DISTINCT shop_id) n, MAX(cast_name)
+           FROM snapshots
+           WHERE cast_id IS NOT NULL AND target_date >= ?
+           GROUP BY cast_id HAVING n > 1""", (cutoff,)).fetchall()
+    if tr:
+        lines.append(f"  複数店舗に出現（直近{transfer_days}日, 移籍?）:")
+        for cid, sids, n, cname in tr[:10]:
+            lines.append(f"    {cname} (id={cid}): "
+                         + ", ".join(names.get(int(s), s)
+                                     for s in sids.split(",")))
+    return lines
+
+
+def section_cast_detail(conn, shop_id, cast_id=None, cast_name=None,
+                        last_days=14):
+    """One cast's full profile: weekday attendance, sell-out hours,
+    recent per-day states. `cast show` prints this."""
+    ck, cname = _resolve_cast(conn, shop_id, cast_id, cast_name)
+    hist = conn.execute(
+        """SELECT target_date, status_norm, first_sold_out_at, work_hours
+           FROM daily_cast_status
+           WHERE shop_id = ? AND cast_key = ?
+           ORDER BY target_date""", (shop_id, ck)).fetchall()
+    if not hist:
+        return [f"  {cname}: daily_cast_status にデータなし"
+                "（先に rollup を実行）"]
+    shop = conn.execute(
+        "SELECT name FROM shops WHERE shop_id = ?", (shop_id,)).fetchone()
+    lines = [f"  {shop[0] if shop else shop_id} - {cname} (key={ck})"]
+    wd = Counter(datetime.fromisoformat(d).weekday()
+                 for d, *_ in hist)
+    wdtxt = " ".join(f"{_WD[(i + 1) % 7]}: {wd.get(i, 0)}日"
+                     for i in range(7) if wd.get(i, 0))
+    lines.append(f"  出勤曜日傾向: {wdtxt}")
+    so_hours = sorted(int(fa[11:13])
+                      for _, st, fa, _ in hist
+                      if st == "sold_out" and fa)
+    if so_hours:
+        import statistics
+        lines.append(
+            f"  完売時刻（初観測）: {', '.join(f'{h:02d}時' for h in so_hours)}"
+            f"  中央値 {statistics.median(so_hours):.0f}時")
+    lines.append("  直近の日別:")
+    mark = {"sold_out": "完売", "low": "残少", "available": "空き",
+            "closed": "終了", "dummy": "ダミー", "unknown": "不明"}
+    for d, st, fa, wh in hist[-last_days:]:
+        t = f" {fa[11:16]}完売" if st == "sold_out" and fa else ""
+        lines.append(f"    {d} {mark.get(st, st)}{t}")
+    n = len(hist)
+    so = sum(1 for _, st, _, _ in hist if st == "sold_out")
+    lines.append(f"  累計: {n}日出勤, 完売 {so}日 ({so / n * 100:.0f}%)")
     return lines
 
 
@@ -802,6 +1125,9 @@ def print_report(conn, date=None, min_days=2, threshold=0.6,
     head(f"【4】完売予兆（{date} 現在 low の注目cast）")
     for line in section_forecast(conn, date, min_days):
         print(line)
+    head(f"【4b】予約の勢い（{date} 枠消化トップ）")
+    for line in section_momentum(conn, date):
+        print(line)
     head("【5】完売の初観測タイミング")
     for line in section_timing(conn, dates):
         print(line)
@@ -817,15 +1143,322 @@ def print_report(conn, date=None, min_days=2, threshold=0.6,
     head(f"【9】週間ランキング照合（{date}）")
     for line in section_ranking(conn, date):
         print(line)
+    head("【9b】ランキング変動（大阪全体, 週間）")
+    for line in section_rank_moves(conn):
+        print(line)
+    head(f"【9c】新規cast・移籍（{date}）")
+    for line in section_new_casts(conn, date):
+        print(line)
     head("【10】cast整合性・データ品質")
     for line in section_consistency(conn):
         print(line)
     head("【11】データカバレッジ監査")
     for line in section_coverage(conn, dates):
         print(line)
-    head("【12】runner ジョブ履歴")
+    head(f"【12】ウォッチ中キャスト（{date}）")
+    for line in section_watch(conn, date):
+        print(line)
+    head("【13】runner ジョブ履歴")
     for line in section_runlog(conn):
         print(line)
+
+
+# ------------------------------------------------------ watch / notify ----
+
+def _resolve_cast(conn, shop_id, cast_id=None, cast_name=None):
+    """Resolve (cast_key, cast_name) for a watch target from snapshots.
+
+    cast_id wins when both are given; name-only watches key on the name
+    (renames won't follow, which matches COALESCE semantics)."""
+    if cast_id is not None:
+        row = conn.execute(
+            """SELECT CAST(COALESCE(cast_id, cast_name) AS TEXT), cast_name
+               FROM snapshots WHERE shop_id = ? AND cast_id = ?
+               ORDER BY fetched_at DESC LIMIT 1""",
+            (shop_id, cast_id)).fetchone()
+        if row:
+            return row[0], row[1]
+        return str(cast_id), cast_name or str(cast_id)
+    row = conn.execute(
+        """SELECT CAST(COALESCE(cast_id, cast_name) AS TEXT), cast_name
+           FROM snapshots WHERE shop_id = ? AND cast_name = ?
+           ORDER BY fetched_at DESC LIMIT 1""",
+        (shop_id, cast_name)).fetchone()
+    if row:
+        return row[0], row[1]
+    return str(cast_name), cast_name
+
+
+def watch_add(conn, shop_id, cast_id=None, cast_name=None, note=None):
+    ck, cname = _resolve_cast(conn, shop_id, cast_id, cast_name)
+    conn.execute(
+        """INSERT INTO cast_watch (cast_key, shop_id, cast_name,
+                                    added_at, note)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(shop_id, cast_key) DO UPDATE SET
+             cast_name = excluded.cast_name, note = excluded.note""",
+        (ck, shop_id, cname,
+         now_jst().strftime("%Y-%m-%d %H:%M:%S") + " JST", note))
+    conn.commit()
+    return ck, cname
+
+
+def watch_remove(conn, shop_id, cast_id=None, cast_name=None):
+    ck, _ = _resolve_cast(conn, shop_id, cast_id, cast_name)
+    cur = conn.execute(
+        "DELETE FROM cast_watch WHERE shop_id = ? AND cast_key = ?",
+        (shop_id, ck))
+    conn.commit()
+    return cur.rowcount
+
+
+def build_notify_text(conn, date, min_days=2, threshold=0.6, limit=8):
+    """Notification body: alerts + forecast + rank moves + watch hits.
+
+    Short by design - the report/dashboard carry the detail; the push
+    only needs 'what changed that I should open the site for'."""
+    parts = [f"[estama] {date} レポート"]
+    alerts, _ = usually_sold_out_alert(conn, date, min_days, threshold)
+    if alerts:
+        parts.append("■ 普段完売なのに空き:")
+        for shop, cast, norm, raw, n_sold, n, rate in alerts[:limit]:
+            parts.append(f"  {shop} - {cast} [{raw}] (完売率 {rate:.0%})")
+    try:
+        watch = conn.execute(
+            """SELECT w.shop_id, w.cast_key, w.cast_name FROM cast_watch w
+            """).fetchall()
+    except sqlite3.OperationalError:
+        watch = []
+    if watch:
+        finals = {f"{r['shop_id']}|{_ckey(r)}": r
+                  for r in _day_finals(conn, date)}
+        hits, sold = [], []
+        for sid, ck, cname in watch:
+            r = finals.get(f"{sid}|{ck}")
+            if not r:
+                continue
+            if r["status_norm"] in ("available", "low"):
+                hits.append(f"  {cname}: [{r['status_raw']}]")
+            elif r["status_norm"] == "sold_out":
+                sold.append(f"  {cname}")
+        if hits:
+            parts.append("■ ウォッチ中のcastが空き/残少:")
+            parts += hits[:limit]
+        if sold:
+            parts.append("■ ウォッチ中のcastが完売:")
+            parts += sold[:limit]
+    try:
+        ev = conn.execute(
+            """SELECT candidates, hits FROM forecast_eval
+               WHERE target_date = ?""", (date,)).fetchone()
+    except sqlite3.OperationalError:
+        ev = None
+    if ev and ev[0]:
+        parts.append(f"■ 本日の予兆採点(速報): low→完売 {ev[1]}/{ev[0]}")
+    moves = [l for l in section_rank_moves(conn)
+             if any(t in l for t in ("↑", "↓", "新規IN", "圏外OUT"))]
+    if moves:
+        parts.append("■ ランキング変動:")
+        parts += moves[:8]
+        if len(moves) > 8:
+            parts.append(f"  ...他 {len(moves) - 8}件")
+    mom = [l for l in section_momentum(conn, date) if "勢い" in l]
+    if mom:
+        parts.append("■ 予約の勢い（枠消化中）:")
+        parts += [l.strip() for l in mom[:5]]
+    news = [l.strip() for l in section_new_casts(conn, date)
+            if l.strip().startswith("新規cast（") or l.strip().startswith("複数店舗")]
+    if news:
+        parts += news
+    try:
+        fails = conn.execute(
+            """SELECT job, started_at, detail FROM run_log
+               WHERE status = 'fail' ORDER BY run_id DESC LIMIT 3"""
+        ).fetchall()
+    except sqlite3.OperationalError:
+        fails = []
+    if fails:
+        parts.append("■ runner失敗:")
+        parts += [f"  {j} {st} {dt or ''}" for j, st, dt in fails]
+    if len(parts) == 1:
+        parts.append("特記事項なし")
+    return "\n".join(parts)
+
+
+# ------------------------------------------------------------ dashboard ----
+
+_DASH_CSS = """
+* { box-sizing: border-box; margin: 0; }
+body { font-family: -apple-system, "Hiragino Sans", sans-serif;
+       background: #0f1420; color: #e8ecf4; padding: 16px;
+       max-width: 860px; margin: 0 auto; }
+h1 { font-size: 20px; margin-bottom: 4px; }
+.sub { color: #8b93a7; font-size: 12px; margin-bottom: 16px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+         gap: 8px; margin-bottom: 20px; }
+.card { background: #1a2133; border-radius: 10px; padding: 12px; text-align: center; }
+.card .n { font-size: 26px; font-weight: 700; }
+.card .l { font-size: 11px; color: #8b93a7; margin-top: 2px; }
+.c-sold .n { color: #ff6b81; } .c-low .n { color: #f5c451; }
+.c-avail .n { color: #4ade80; } .c-closed .n { color: #8b93a7; }
+section { background: #1a2133; border-radius: 10px; padding: 14px 16px;
+          margin-bottom: 14px; }
+h2 { font-size: 14px; margin-bottom: 10px; color: #aab4cf; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+td, th { padding: 6px 8px; text-align: left; border-bottom: 1px solid #2a3350; }
+th { color: #8b93a7; font-weight: 600; font-size: 11px; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 99px;
+         font-size: 11px; font-weight: 600; }
+.b-sold { background: #4a1f2b; color: #ff8fa0; }
+.b-low { background: #4a3a1f; color: #f5c451; }
+.b-avail { background: #1f4a2e; color: #4ade80; }
+.b-closed { background: #2a3350; color: #8b93a7; }
+.b-unknown, .b-dummy { background: #2a3350; color: #aab4cf; }
+.warn { color: #f5c451; }
+.mut { color: #8b93a7; font-size: 12px; }
+"""
+
+
+def _badge(norm):
+    label = {"sold_out": "完売", "low": "残少", "available": "空き",
+             "closed": "終了", "dummy": "ダミー", "unknown": "不明"
+             }.get(norm, norm)
+    cls = {"sold_out": "b-sold", "low": "b-low", "available": "b-avail",
+           "closed": "b-closed"}.get(norm, "b-unknown")
+    return f'<span class="badge {cls}">{label}</span>'
+
+
+def build_dashboard(conn, date=None, min_days=2, threshold=0.6):
+    """Self-contained HTML dashboard. No JS, no external assets."""
+    import html
+    esc = html.escape
+    dates = _all_dates(conn)
+    date = date or (dates[-1] if dates else now_jst().date().isoformat())
+    counts = dict(status_counts(conn, date))
+    finals = _day_finals(conn, date)
+    names = {s: n for s, n in
+             conn.execute("SELECT shop_id, name FROM shops")}
+
+    cards = "".join(
+        f'<div class="card c-{k}"><div class="n">{counts.get(k, 0)}</div>'
+        f'<div class="l">{label}</div></div>'
+        for k, label in [("sold_out", "完売"), ("low", "残りわずか"),
+                         ("available", "空き"), ("closed", "受付終了"),
+                         ("dummy", "ダミー"), ("unknown", "不明")])
+
+    def rows_of(status):
+        return [r for r in finals if r["status_norm"] == status]
+
+    def table(status, cols=True):
+        rs = rows_of(status)
+        if not rs:
+            return f'<p class="mut">該当なし</p>'
+        body = "".join(
+            f"<tr><td>{esc(names.get(r['shop_id'], str(r['shop_id'])))}</td>"
+            f"<td>{esc(r['cast_name'])}</td>"
+            f"<td>{esc(str(r['shift'] or ''))}</td>"
+            f"<td>{_badge(r['status_norm'])}</td></tr>"
+            for r in sorted(rs, key=lambda r: (names.get(
+                r['shop_id'], ''), r['cast_name'])))
+        return ("<table><tr><th>店舗</th><th>キャスト</th><th>シフト</th>"
+                f"<th>状態</th></tr>{body}</table>")
+
+    alerts, _ = usually_sold_out_alert(conn, date, min_days, threshold)
+    alert_html = "".join(
+        f"<tr><td>{esc(shop)}</td><td>{esc(cast)}</td>"
+        f"<td>{_badge(norm)}</td><td>{rate:.0%} ({n_sold}/{n}日)</td></tr>"
+        for shop, cast, norm, raw, n_sold, n, rate in alerts)
+    alert_html = (f"<table><tr><th>店舗</th><th>キャスト</th><th>今</th>"
+                  f"<th>過去完売率</th></tr>{alert_html}</table>"
+                  if alerts else '<p class="mut">該当なし</p>')
+
+    fc = section_forecast(conn, date, min_days)
+    fc_html = "".join(f"<div>{esc(l.strip())}</div>" for l in fc
+                      if l.strip() and not l.startswith("  採点"))
+    ev = [l for l in fc if "採点" in l or l.strip().startswith("202")]
+    ev_html = "".join(f'<div class="mut">{esc(l.strip())}</div>'
+                      for l in ev)
+
+    watch_lines = section_watch(conn, date)
+    watch_html = "".join(f"<div>{esc(l.strip())}</div>"
+                         for l in watch_lines)
+
+    move_lines = section_rank_moves(conn)
+    move_html = "".join(f"<div>{esc(l.strip())}</div>" for l in move_lines)
+
+    streak = section_streaks(conn, dates, 2)
+    streak_html = "".join(f"<div>{esc(l.strip())}</div>" for l in streak)
+
+    mom = section_momentum(conn, date)
+    mom_html = "".join(f"<div>{esc(l.strip())}</div>" for l in mom)
+
+    newc = section_new_casts(conn, date)
+    newc_html = "".join(f"<div>{esc(l.strip())}</div>" for l in newc)
+
+    # weekday x hour heatmap of first_sold_out_at (all history)
+    heat = {}
+    for wd, hh, n in conn.execute(
+            """SELECT strftime('%w', target_date),
+                      CAST(substr(first_sold_out_at, 12, 2) AS INTEGER),
+                      COUNT(*)
+               FROM daily_cast_status WHERE first_sold_out_at IS NOT NULL
+               GROUP BY 1, 2"""):
+        heat[(int(wd), hh)] = n
+    hmax = max(heat.values()) if heat else 1
+    wd_hdr = "".join(f"<th>{_WD[(i + 1) % 7]}</th>" for i in range(7))
+    body_rows = ""
+    for hh in range(6, 24):
+        cells = f"<td class='mut'>{hh:02d}</td>"
+        for py_wd in range(7):
+            n = heat.get(((py_wd + 1) % 7, hh), 0)
+            op = 0.12 + 0.85 * n / hmax if n else 0.03
+            cells += (f'<td style="background:rgba(255,107,129,{op:.2f});'
+                      f'text-align:center">{n or ""}</td>')
+        body_rows += f"<tr>{cells}</tr>"
+    for hh in range(0, 6):
+        cells = f"<td class='mut'>{hh:02d}</td>"
+        for py_wd in range(7):
+            n = heat.get(((py_wd + 1) % 7, hh), 0)
+            op = 0.12 + 0.85 * n / hmax if n else 0.03
+            cells += (f'<td style="background:rgba(255,107,129,{op:.2f});'
+                      f'text-align:center">{n or ""}</td>')
+        body_rows += f"<tr>{cells}</tr>"
+    heat_html = (f"<table><tr><th>時</th>{wd_hdr}</tr>"
+                 f"{body_rows}</table>"
+                 '<div class="mut">完売の初観測時刻の分布（全期間, 件数）</div>')
+
+    cov_warn = []
+    low_cov = _low_coverage_shops(conn, date)
+    for s, h in sorted(low_cov.items(), key=lambda x: x[1]):
+        cov_warn.append(
+            f'<div class="warn">⚠ {esc(names.get(s, str(s)))}: '
+            f'今日 {h}時間のみ取得（巡回欠損の可能性）</div>')
+    cov_html = "".join(cov_warn) or '<p class="mut">異常なし</p>'
+
+    gen = now_jst().strftime("%Y-%m-%d %H:%M JST")
+    return f"""<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>estama tracker - {date}</title><style>{_DASH_CSS}</style></head>
+<body>
+<h1>estama tracker</h1>
+<div class="sub">営業日 {date} / 生成 {gen} / R3最終状態</div>
+<div class="cards">{cards}</div>
+<section><h2>🔔 アラート: 普段完売なのに空き</h2>{alert_html}</section>
+<section><h2>⭐ ウォッチ中キャスト</h2>{watch_html}</section>
+<section><h2>完売（{counts.get('sold_out', 0)}人）</h2>{table('sold_out')}</section>
+<section><h2>残りわずか（{counts.get('low', 0)}人）・完売予兆</h2>
+{table('low')}<div class="mut" style="margin-top:8px">{fc_html}</div>
+{ev_html}</section>
+<section><h2>🚀 予約の勢い（枠消化）</h2>{mom_html}</section>
+<section><h2>📈 ランキング変動（大阪全体・週間）</h2>{move_html}</section>
+<section><h2>🆕 新規cast・移籍</h2>{newc_html}</section>
+<section><h2>🗓 完売ヒートマップ（曜日×時刻）</h2>{heat_html}</section>
+<section><h2>🔥 連続完売</h2>{streak_html}</section>
+<section><h2>⚠ データカバレッジ警告</h2>{cov_html}</section>
+<div class="mut" style="margin-top:8px">
+estama-tracker auto-generated dashboard</div>
+</body></html>"""
 
 
 def run_demo():
@@ -930,6 +1563,32 @@ def main(argv=None):
     p.add_argument("--top", type=int, default=15,
                    help="rows shown in area/shop sections")
     p.add_argument("--db", default=str(BASE / "estama.db"))
+    p = sub.add_parser("watch", help="favorite casts: add/remove/list")
+    p.add_argument("action", choices=("add", "remove", "list"))
+    p.add_argument("--shop-id", type=int)
+    p.add_argument("--cast-id", type=int)
+    p.add_argument("--cast-name")
+    p.add_argument("--note")
+    p.add_argument("--db", default=str(BASE / "estama.db"))
+    p = sub.add_parser("notify",
+                       help="POST alert/forecast summary to the "
+                            "ESTAMA_NOTIFY_WEBHOOK webhook")
+    p.add_argument("--date", help="business date (default: latest)")
+    p.add_argument("--min-days", type=int, default=2)
+    p.add_argument("--threshold", type=float, default=0.6)
+    p.add_argument("--db", default=str(BASE / "estama.db"))
+    p = sub.add_parser("dashboard",
+                       help="write a self-contained HTML dashboard")
+    p.add_argument("--date", help="business date (default: latest)")
+    p.add_argument("--out", default=str(BASE / "dashboard.html"))
+    p.add_argument("--db", default=str(BASE / "estama.db"))
+    p = sub.add_parser("cast",
+                       help="one cast's profile: attendance, sell-out "
+                            "hours, recent days")
+    p.add_argument("--shop-id", type=int, required=True)
+    p.add_argument("--cast-id", type=int)
+    p.add_argument("--cast-name")
+    p.add_argument("--db", default=str(BASE / "estama.db"))
 
     args = parser.parse_args(argv)
 
@@ -994,6 +1653,57 @@ def main(argv=None):
     if args.cmd == "report":
         print_report(conn, args.date, args.min_days, args.threshold,
                      args.streak_min, args.top)
+        return 0
+    if args.cmd == "watch":
+        if args.action == "list":
+            rows = conn.execute(
+                "SELECT shop_id, cast_key, cast_name, added_at, note"
+                " FROM cast_watch ORDER BY added_at").fetchall()
+            if not rows:
+                print("cast_watch: empty")
+            for sid, ck, cn, at, nt in rows:
+                print(f"  shop={sid} key={ck} {cn} ({at})"
+                      + (f" - {nt}" if nt else ""))
+            return 0
+        if args.shop_id is None or (args.cast_id is None
+                                    and args.cast_name is None):
+            print("watch add/remove needs --shop-id and "
+                  "--cast-id or --cast-name")
+            return 2
+        if args.action == "add":
+            ck, cname = watch_add(conn, args.shop_id, args.cast_id,
+                                  args.cast_name, args.note)
+            print(f"watch added: shop={args.shop_id} key={ck} {cname}")
+            return 0
+        n = watch_remove(conn, args.shop_id, args.cast_id,
+                         args.cast_name)
+        print(f"watch removed: {n} row(s)")
+        return 0 if n else 1
+    if args.cmd == "notify":
+        dates = _all_dates(conn)
+        date = args.date or (dates[-1] if dates else
+                             now_jst().date().isoformat())
+        text = build_notify_text(conn, date, args.min_days,
+                                 args.threshold)
+        print(text)
+        if notify_webhook(text):
+            print("notify: webhook posted")
+        else:
+            print("notify: no ESTAMA_NOTIFY_WEBHOOK set or POST failed "
+                  "(text printed above)")
+        return 0
+    if args.cmd == "dashboard":
+        html = build_dashboard(conn, args.date)
+        Path(args.out).write_text(html, encoding="utf-8")
+        print(f"dashboard written: {args.out}")
+        return 0
+    if args.cmd == "cast":
+        if args.cast_id is None and args.cast_name is None:
+            print("cast needs --cast-id or --cast-name")
+            return 2
+        for line in section_cast_detail(conn, args.shop_id,
+                                        args.cast_id, args.cast_name):
+            print(line)
         return 0
     return 1
 

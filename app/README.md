@@ -65,8 +65,24 @@ python3 -m venv venv
 ./venv/bin/python app/estama_tracker.py rollup
 
 # 全セクション分析レポート（日次サマリー/ストリーク/アラート/完売予兆/
-# タイミング/遷移/エリア/店舗/ランキング照合/品質/カバレッジ監査/runner履歴）
+# タイミング/遷移/エリア/店舗/ランキング照合/ランキング変動/品質/
+# カバレッジ監査/ウォッチ中cast/runner履歴）
 ./venv/bin/python app/estama_tracker.py report --date 2026-10-28
+
+# お気に入りキャストのウォッチ登録（DB内テーブルなのでデータと一緒に残る）
+./venv/bin/python app/estama_tracker.py watch add --shop-id 25081 --cast-id 362395
+./venv/bin/python app/estama_tracker.py watch list
+./venv/bin/python app/estama_tracker.py watch remove --shop-id 25081 --cast-id 362395
+
+# push通知（ESTAMA_NOTIFY_WEBHOOK があれば POST、なくても本文を表示）
+export ESTAMA_NOTIFY_WEBHOOK=https://discord.com/api/webhooks/...   # Slack/Discord両対応
+./venv/bin/python app/estama_tracker.py notify
+
+# HTMLダッシュボード生成（runner が毎job後に生成して data ブランチへ dashboard.html としてpush）
+./venv/bin/python app/estama_tracker.py dashboard --out dashboard.html
+
+# キャスト個別ビュー（出勤曜日・完売時刻・日別履歴・完売率）
+./venv/bin/python app/estama_tracker.py cast --shop-id 25081 --cast-id 362395
 ```
 
 ## テスト
@@ -99,5 +115,13 @@ python3 tests/test_prune.py           # 出禁ルール
 - **`scrape_log`** … 店舗ごとの巡回結果（`ok|empty|fail`＋行数＋エラー内容）。「取得失敗」と「出勤0人」を区別するための監査テーブル。runner 経由なら `run_id` で `run_log` と結合できる（runner が `ESTAMA_RUN_ID` を環境変数で渡す）。`report`【12】で時間帯別 ok/empty/fail と直近の異常を閲覧
 - **巡回欠損とアラート**: `report`【11】が店ごとの巡回カバー時間数の中央値から異常にカバーが低い店を検出し、【3】アラートに `<<巡回欠損>>` を併記する（取得不足による誤報防止）
 - **ランキング同期の watchlist 自動追加**: `ranking_scraper.py --sync-max-rank N` で上位 N 位までの未登録店を `shops.json` に追加（`source: ranking`）。runner は 30 で呼ぶ
+- **`was_low` / `forecast_eval`** … `daily_cast_status.was_low` は「初完売観測前（または完売なし日の全体）で low を観測」した cast-day に1。`forecast_eval` は rollup が日ごとに `was_low → sold_out` の的中数を書く自己採点テーブルで、【4】に推移を表示
+- **`cast_watch`** … お気に入りキャストのDB内watchlist。`watch add/remove/list` で管理（cast_id優先のキー解決）。report【12】が今日の状態＋曜日別出勤傾向を表示し、`notify` の対象にもなる
+- **ランキング変動** … report【9b】がエリア2700（大阪全体）の直近2スナップで ±5位以上の変動・新規IN・圏外OUTを検出。`notify` の通知対象
+- **push通知** … `notify` コマンドがアラート+ウォッチhit/完売+予兆採点+ランキング変動+枠消化の勢い+新規cast+runner失敗を1メッセージにして `ESTAMA_NOTIFY_WEBHOOK` へPOST（Slack/Discord両方で使える `text`/`content` 併記payload）。未設定でも本文を表示。runnerは各job後にbest-effortで呼ぶ（失敗してもjobは落とさない）
+- **HTMLダッシュボード** … `dashboard` コマンドが外部依存ゼロの静的HTMLを生成。runnerは publish() でDBアップロード後に `dashboard.html` として data ブランチへpushするので、htmlpreview 等でブラウザから見られる。曜日×時刻の完売ヒートマップ（first_sold_out_at 全集計）つき
+- **予約の勢い（枠消化）** … `slot_pattern` の `×Nコマ`（予約済み枠）の時系列増分で「予約が入っている」勢いを検出。low より早く燃える兆候を report【4b】/dashboard/notify で表示
+- **新規cast・移籍検出** … report【9c】が当日初登場のcast_idと、直近14日で複数店舗に出現するcast_id（移籍候補）を一覧化
+- **cast コマンド** … `cast --shop-id X --cast-id Y` が個別キャストの出勤曜日傾向・初完売時刻の分布・直近日別・累計完売率を表示。「何時までに予約すべきか」の判断材料
 - **「時間のみ」ステータス**: サイト側がステータス文言を設定していないキャスト（予約枠0・空き枠0）にスクレイパーが付けるラベル。ダミー/架空人物の可能性が高く、`closed`（受付終了相当）に分類される。ステータス文言がない限り `sold_out` にはならない（ダミー対策）
 - **「TELのみ」= `dummy`**: タイムテーブルのセルが全て `TEL`（電話のみ＝オンライン予約枠なし）のキャスト。`status_norm` は **`dummy`**（`available`/`closed` にはしない）。`slot_pattern` は `全Nコマ TEL (電話のみ)`。サイト文言がある場合も `文言 / TELのみ` にして `dummy`（完売文言があれば `sold_out` 優先）。列は `td[data-idx]=cast_id` で縦に紐付ける
