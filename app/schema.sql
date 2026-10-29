@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS daily_cast_status (
     age         INTEGER,
     fetched_at  TEXT,              -- timestamp of the winning observation
     first_sold_out_at TEXT,        -- earliest sold_out fetched_at that day (NULL if never)
+    was_low     INTEGER NOT NULL DEFAULT 0,  -- 'low' observed before the sold_out (or at all, if never)
     PRIMARY KEY (shop_id, cast_key, target_date)
 );
 
@@ -128,3 +129,28 @@ CREATE INDEX IF NOT EXISTS idx_scrape_log_shop
     ON scrape_log (shop_id, fetched_at);
 CREATE INDEX IF NOT EXISTS idx_scrape_log_status
     ON scrape_log (status, fetched_at);
+
+-- Per-day evaluation of the 'low -> sold_out' forecast: of the casts
+-- that showed 'low' during the day, how many ended up sold_out.
+-- Written by `estama_tracker.py rollup` (after daily_cast_status so
+-- was_low already exists); report section 4 prints the trend and the
+-- cumulative precision, so the forecast's reliability is measurable
+-- instead of assumed.
+CREATE TABLE IF NOT EXISTS forecast_eval (
+    target_date TEXT PRIMARY KEY,
+    candidates  INTEGER NOT NULL,  -- cast-days with was_low = 1
+    hits        INTEGER NOT NULL,  -- ... that ended the day sold_out
+    evaluated_at TEXT NOT NULL
+);
+
+-- User-managed favorite casts: 'watch add/remove/list' CLI writes
+-- here so the list survives through the DB itself (the data branch
+-- carries the DB, so favorites follow it like everything else).
+CREATE TABLE IF NOT EXISTS cast_watch (
+    cast_key  TEXT NOT NULL,       -- CAST(COALESCE(cast_id, cast_name) AS TEXT)
+    shop_id   INTEGER NOT NULL,
+    cast_name TEXT NOT NULL,
+    added_at  TEXT NOT NULL,
+    note      TEXT,
+    PRIMARY KEY (shop_id, cast_key)
+);

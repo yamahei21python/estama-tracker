@@ -580,8 +580,31 @@ def job_checkpoint() -> str:
     log(f"checkpoint: snapshots {before} -> {after} (+{after - before})")
     if after <= before:
         raise RuntimeError("checkpoint imported no new rows - refusing to upload")
-    upload_db()
+    publish()
     return f"snapshots +{after - before} ({before} -> {after})"
+
+
+# --------------------------------------------------------- publish ----
+# What goes out after each job: the DB itself, the HTML dashboard the
+# user reads on the data branch, and a webhook ping when something
+# noteworthy happened. Both are best-effort: a broken notifier or a
+# failed html write must not kill a good scrape.
+DASHBOARD = APP / "dashboard.html"
+
+
+def publish() -> None:
+    upload_db()
+    try:
+        run_scraper(["estama_tracker.py", "dashboard", "--out",
+                     str(DASHBOARD)])
+        storage_put("dashboard.html", DASHBOARD)
+        log("publish: dashboard.html uploaded")
+    except Exception as exc:
+        log(f"publish: dashboard skipped: {exc}")
+    try:
+        run_scraper(["estama_tracker.py", "notify"])
+    except Exception as exc:
+        log(f"publish: notify skipped: {exc}")
 
 
 def job_ranking() -> str:
@@ -592,7 +615,7 @@ def job_ranking() -> str:
     run_scraper(["estama_tracker.py", "rollup"])  # refresh daily_cast_status
     enforce_ban()   # a sync must never resurrect a banned shop
     banned = job_prune()  # daily: ban shops w/ 20+ observed days, zero sell-outs
-    upload_db()
+    publish()
     # shops.json is part of the deliverable too
     storage_put("shops.json", APP / "shops.json")
     log("ranking: shops.json uploaded")

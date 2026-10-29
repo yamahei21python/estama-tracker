@@ -14,6 +14,8 @@ from estama_tracker import (  # noqa: E402
     rollup_daily, section_daily, section_streaks,
     section_transitions, section_consistency,
     section_forecast, section_coverage, section_runlog,
+    section_rank_moves, section_watch,
+    watch_add, watch_remove, build_notify_text, build_dashboard,
 )
 
 SCHEMA = (Path(__file__).resolve().parent.parent / "app" / "schema.sql").read_text()
@@ -95,6 +97,28 @@ fa = {r[3]: r[7] for r in c.execute(
     " FROM daily_cast_status")}
 check("rollup: first_sold_out_at persisted",
       fa["A"] == "2026-10-26 18:00:00 JST" and fa["B"] is None)
+
+# 4c. was_low flag + forecast_eval self-scoring
+c = fresh()
+add(c, "A", "2026-10-26", "low", "2026-10-26 12:00:00 JST", cast_id=10)
+add(c, "A", "2026-10-26", "sold_out", "2026-10-26 18:00:00 JST", cast_id=10)
+add(c, "B", "2026-10-26", "low", "2026-10-26 12:00:00 JST", cast_id=11)
+add(c, "B", "2026-10-26", "available", "2026-10-26 18:00:00 JST", cast_id=11)
+add(c, "C", "2026-10-26", "low", "2026-10-26 19:00:00 JST", cast_id=12)
+add(c, "C", "2026-10-26", "sold_out", "2026-10-26 18:00:00 JST", cast_id=12)
+rollup_daily(c)
+wl = {r[3]: r[8] for r in c.execute(
+    "SELECT shop_id, cast_key, cast_id, cast_name, target_date,"
+    " status_norm, fetched_at, first_sold_out_at, was_low"
+    " FROM daily_cast_status")}
+# A: low before sold_out -> was_low; B: low, never sold -> was_low;
+# C: low only AFTER the sold_out -> was_low = 0
+check("rollup: was_low flag",
+      wl["A"] == 1 and wl["B"] == 1 and wl["C"] == 0)
+ev = c.execute(
+    "SELECT candidates, hits FROM forecast_eval"
+    " WHERE target_date='2026-10-26'").fetchone()
+check("rollup: forecast_eval scored", ev == (2, 1))
 
 # 5. section_daily counts use R3 states
 c = fresh()
@@ -184,6 +208,73 @@ lines = section_runlog(c)
 check("section_runlog: stale running flagged",
       any("滞留run" in l and "checkpoint" in l for l in lines)
       and not any("滞留run" in l and "prune" in l for l in lines))
+
+# 12. rank moves between two ranking snapshots
+c = fresh()
+for i, (cid, nm, rk) in enumerate([
+        (101, "上昇子", 12), (102, "下降子", 10), (103, "静止子", 20),
+        (104, "消え子", 25)]):
+    c.execute(
+        "INSERT INTO cast_rankings (area_code, area_name, period_type,"
+        " rank, is_pr, cast_id, cast_name, shop_id, shop_name,"
+        " fetched_date, fetched_at) VALUES ('2700','大阪','weekly',"
+        " ?, 0, ?, ?, 1, 'テスト店', '2026-10-28', '2026-10-28 06:00:00 JST')",
+        (rk, cid, nm))
+for cid, nm, rk in [(101, "上昇子", 2), (102, "下降子", 18),
+                    (103, "静止子", 20), (105, "新人", 15)]:
+    c.execute(
+        "INSERT INTO cast_rankings (area_code, area_name, period_type,"
+        " rank, is_pr, cast_id, cast_name, shop_id, shop_name,"
+        " fetched_date, fetched_at) VALUES ('2700','大阪','weekly',"
+        " ?, 0, ?, ?, 1, 'テスト店', '2026-10-29', '2026-10-29 06:00:00 JST')",
+        (rk, cid, nm))
+lines = section_rank_moves(c)
+check("section_rank_moves: movers + in/out",
+      any("上昇子" in l and "12位 -> 2位" in l for l in lines)
+      and any("下降子" in l and "10位 -> 18位" in l for l in lines)
+      and any("新規IN" in l and "新人" in l for l in lines)
+      and any("圏外OUT" in l and "消え子" in l for l in lines)
+      and not any("静止子" in l for l in lines))
+
+# 13. cast_watch: add/list/remove + section output
+c = fresh()
+add(c, "推し", "2026-10-26", "sold_out", "2026-10-26 12:00:00 JST", cast_id=77)
+add(c, "推し", "2026-10-27", "available", "2026-10-27 12:00:00 JST",
+    cast_id=77)
+rollup_daily(c)
+ck, cname = watch_add(c, 1, cast_id=77)
+check("watch_add resolves key+name", ck == "77" and cname == "推し")
+lines = section_watch(c, "2026-10-27")
+check("section_watch: status + weekday",
+      any("推し" in l and "空き" in l and "月1" in l and "火1" in l
+          for l in lines))
+n = watch_remove(c, 1, cast_id=77)
+check("watch_remove", n == 1)
+
+# 14. notify text carries alerts + watch hits
+c = fresh()
+add(c, "常連", "2026-10-26", "sold_out", "2026-10-26 12:00:00 JST",
+    cast_id=10)
+add(c, "常連", "2026-10-27", "sold_out", "2026-10-27 12:00:00 JST",
+    cast_id=10)
+add(c, "常連", "2026-10-28", "available", "2026-10-28 12:00:00 JST",
+    cast_id=10)
+rollup_daily(c)
+watch_add(c, 1, cast_id=10)
+text = build_notify_text(c, "2026-10-28")
+check("build_notify_text: alert + watch hit",
+      "普段完売なのに空き" in text and "ウォッチ中" in text)
+
+# 15. dashboard renders key sections
+c = fresh()
+add(c, "A", "2026-10-26", "sold_out", "2026-10-26 12:00:00 JST",
+    cast_id=10)
+add(c, "B", "2026-10-26", "low", "2026-10-26 12:00:00 JST", cast_id=11)
+rollup_daily(c)
+html = build_dashboard(c, "2026-10-26")
+check("dashboard: cards + sections",
+      "estama tracker" in html and "完売（1人）" in html
+      and "アラート" in html and "ランキング変動" in html)
 
 print("\nRESULT:", "ALL PASS" if not fails else f"FAILURES: {fails}")
 sys.exit(1 if fails else 0)
