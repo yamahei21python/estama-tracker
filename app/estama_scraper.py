@@ -36,8 +36,8 @@ except ImportError:
 
 from common import (BASE_DIR, DB_PATH as DEFAULT_DB, SCHEMA_PATH,
                     SHOPS_JSON_PATH as DEFAULT_SHOPS_JSON, connect_db,
-                    load_json, make_session, normalize_status_text, now_jst,
-                    save_json)
+                    load_json, log_scrape, make_session,
+                    normalize_status_text, now_jst, save_json)
 
 DEFAULT_SHOP_ID = 40900  # 梅田高級メンズエステ SUPER AKUMA GIRLS
 
@@ -877,9 +877,13 @@ def main():
                 if args.import_db:
                     count = import_into_db(data, db_path=args.db)
                     total_imported += count
+                    log_scrape(args.db, shop_id,
+                               "ok" if count else "empty", count)
                     print(f"  {COLOR_GREEN}✅ DB: {count}件 インポート{COLOR_RESET}", file=sys.stderr)
 
             except Exception as e:
+                if args.import_db:
+                    log_scrape(args.db, shop_id, "fail", 0, str(e))
                 print(f"  {COLOR_RED}❌ エラー: {e}{COLOR_RESET}", file=sys.stderr)
 
             # 店舗間インターバル (最後の店舗以外)
@@ -908,8 +912,13 @@ def main():
             sys.exit(1)
 
     print(f"Fetching schedule for shop_id={shop_id} for {args.days} days...", file=sys.stderr)
-    scraper = EstamaScraper(shop_id=shop_id)
-    data = scraper.fetch_multi_days(num_days=args.days)
+    try:
+        scraper = EstamaScraper(shop_id=shop_id)
+        data = scraper.fetch_multi_days(num_days=args.days)
+    except Exception as e:
+        if args.import_db:
+            log_scrape(args.db, shop_id, "fail", 0, str(e))
+        raise
 
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))
@@ -924,6 +933,7 @@ def main():
 
     if args.import_db:
         count = import_into_db(data, db_path=args.db)
+        log_scrape(args.db, shop_id, "ok" if count else "empty", count)
         print(f"\n{COLOR_GREEN}✅ Successfully imported {count} cast rows (checkpoint: {data['fetched_time']}) into {args.db}!{COLOR_RESET}")
 
 

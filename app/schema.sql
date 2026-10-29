@@ -69,3 +69,62 @@ CREATE INDEX IF NOT EXISTS idx_rankings_shop_date
     ON cast_rankings (shop_id, fetched_date);
 CREATE INDEX IF NOT EXISTS idx_rankings_area_date
     ON cast_rankings (area_code, fetched_date);
+
+-- Daily rollup of the R3 effective final state, one row per cast-day.
+-- Written by `estama_tracker.py rollup` (idempotent rebuild from
+-- snapshots; the runner calls it after every import). Makes
+-- "usually sold out" history, sold-out streaks and trend queries
+-- cheap: no window function needed per lookup.
+CREATE TABLE IF NOT EXISTS daily_cast_status (
+    shop_id     INTEGER NOT NULL,
+    cast_key    TEXT NOT NULL,     -- CAST(COALESCE(cast_id, cast_name) AS TEXT)
+    cast_id     INTEGER,
+    cast_name   TEXT NOT NULL,
+    target_date TEXT NOT NULL,
+    status_norm TEXT NOT NULL,
+    status_raw  TEXT,
+    work_hours  REAL,
+    age         INTEGER,
+    fetched_at  TEXT,              -- timestamp of the winning observation
+    first_sold_out_at TEXT,        -- earliest sold_out fetched_at that day (NULL if never)
+    PRIMARY KEY (shop_id, cast_key, target_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_daily_status_date
+    ON daily_cast_status (target_date, status_norm);
+CREATE INDEX IF NOT EXISTS idx_daily_status_cast
+    ON daily_cast_status (cast_key, target_date);
+
+-- Runner job history (checkpoint / ranking / prune), one row per run.
+-- Written by runner.py so scrape failures and skips are queryable
+-- from the DB itself instead of only the runner log files.
+CREATE TABLE IF NOT EXISTS run_log (
+    run_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    job         TEXT NOT NULL,     -- checkpoint | ranking | prune
+    started_at  TEXT NOT NULL,     -- YYYY-MM-DD HH:MM:SS JST
+    finished_at TEXT,
+    status      TEXT NOT NULL,     -- running | ok | fail | skip
+    detail      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_run_log_started
+    ON run_log (started_at);
+
+-- Per-shop scrape audit inside a checkpoint run. One row per shop per
+-- scrape attempt: 'ok' (rows>0), 'empty' (fetch worked, 0 cast rows) and
+-- 'fail' (exception). Without it a failed shop is indistinguishable from
+-- a shop with no casts on duty.
+CREATE TABLE IF NOT EXISTS scrape_log (
+    log_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id     INTEGER,                -- run_log.run_id when launched by runner
+    shop_id    INTEGER NOT NULL,
+    fetched_at TEXT NOT NULL,          -- 'YYYY-MM-DD HH:MM:SS JST'
+    status     TEXT NOT NULL,          -- ok | empty | fail
+    rows       INTEGER NOT NULL DEFAULT 0,
+    detail     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_scrape_log_shop
+    ON scrape_log (shop_id, fetched_at);
+CREATE INDEX IF NOT EXISTS idx_scrape_log_status
+    ON scrape_log (status, fetched_at);

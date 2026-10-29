@@ -22,6 +22,7 @@ ever yields available/low/closed/unknown, never sold_out.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -172,6 +173,28 @@ def load_json(path, default=None):
 def save_json(path, obj) -> None:
     Path(path).write_text(
         json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def log_scrape(db_path, shop_id, status, rows=0, detail=None) -> None:
+    """Append one per-shop scrape outcome to scrape_log.
+
+    Best effort: a logging failure never breaks the scrape. run_id is
+    picked up from the ESTAMA_RUN_ID env var the runner exports when it
+    launches the scraper, so the row joins back to its run_log entry.
+    """
+    try:
+        run_id = os.environ.get("ESTAMA_RUN_ID")
+        conn = connect_db(db_path)
+        conn.execute(
+            "INSERT INTO scrape_log (run_id, shop_id, fetched_at,"
+            " status, rows, detail) VALUES (?, ?, ?, ?, ?, ?)",
+            (int(run_id) if run_id else None, shop_id,
+             now_jst().strftime("%Y-%m-%d %H:%M:%S") + " JST",
+             status, rows, detail))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 
 def normalize_status_text(raw) -> str:

@@ -20,6 +20,8 @@ Usage:
     python estama_tracker.py sold-out [--date YYYY-MM-DD] [--db DB]
     python estama_tracker.py counts [--date YYYY-MM-DD] [--db DB]
     python estama_tracker.py alert --date YYYY-MM-DD [--min-days 3] [--threshold 0.7] [--db DB]
+    python estama_tracker.py rollup [--date YYYY-MM-DD] [--db DB]
+    python estama_tracker.py report [--date YYYY-MM-DD] [--db DB]
     python estama_tracker.py demo
     python estama_tracker.py verify [--db DB]
 """
@@ -28,11 +30,13 @@ import argparse
 import json
 import sqlite3
 import sys
+from collections import Counter
+from datetime import timedelta
 from pathlib import Path
 
 from common import (BASE_DIR as BASE, SCHEMA_PATH as SCHEMA,
                     SHOPS_JSON_PATH as DEFAULT_SHOPS, connect_db, load_json,
-                    normalize_status_text)
+                    normalize_status_text, now_jst)
 
 
 def normalize_status(raw):
@@ -83,13 +87,13 @@ def _final_sql(where: str) -> str:
         WITH ranked AS (
           SELECT shop_id, cast_name, cast_id, target_date, status_norm,
                  status_raw, shift, work_hours, fetched_at, fetched_time,
-                 snapshot_id,
+                 snapshot_id, age,
                  ROW_NUMBER() OVER {_final_window()} AS rn_eff
           FROM snapshots
           WHERE {where}
         )
         SELECT shop_id, cast_name, target_date, status_norm, status_raw,
-               shift, work_hours, cast_id
+               shift, work_hours, cast_id, fetched_at, age
         FROM ranked WHERE rn_eff = 1
     """
 
@@ -269,6 +273,561 @@ def usually_sold_out_alert(conn, target_date, min_days=3, threshold=0.7):
     return alerts, considered
 
 
+def rollup_daily(conn, date=None):
+    """Materialize the R3 effective final state into daily_cast_status.
+
+    One row per (shop_id, cast_key, target_date); cast_key is
+    CAST(COALESCE(cast_id, cast_name) AS TEXT), the same key every
+    aggregation uses. Idempotent rebuild per day (delete + insert), so
+    it is safe to call after every import - the runner does exactly
+    that, making alert history, sold-out streaks and trends a plain
+    table lookup instead of a window pass. Returns rows written.
+    """
+    # first_sold_out_at landed after the table shipped; upgrade old DBs
+    cols = {r[1] for r in conn.execute(
+        "PRAGMA table_info(daily_cast_status)")}
+    if "first_sold_out_at" not in cols:
+        conn.execute(
+            "ALTER TABLE daily_cast_status"
+            " ADD COLUMN first_sold_out_at TEXT")
+
+    if date:
+        days = [date]
+    else:
+        days = [r[0] for r in conn.execute(
+            "SELECT DISTINCT target_date FROM snapshots")]
+    total = 0
+    for d in days:
+        rows = conn.execute(_final_sql("target_date = ?"), (d,)).fetchall()
+        first_so = {f"{s}|{k}": fa for s, k, fa in conn.execute(
+            """SELECT shop_id, CAST(COALESCE(cast_id, cast_name) AS TEXT),
+                      MIN(fetched_at)
+               FROM snapshots
+               WHERE target_date = ? AND status_norm = 'sold_out'
+               GROUP BY 1, 2""", (d,)).fetchall()}
+        conn.execute(
+            "DELETE FROM daily_cast_status WHERE target_date = ?", (d,))
+        conn.executemany(
+            """INSERT INTO daily_cast_status
+               (shop_id, cast_key, cast_id, cast_name, target_date,
+                status_norm, status_raw, work_hours, age, fetched_at,
+                first_sold_out_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [(r[0], str(r[7] if r[7] is not None else r[1]), r[7], r[1],
+              r[2], r[3], r[4], r[6], r[9], r[8],
+              first_so.get(f"{r[0]}|{r[7] if r[7] is not None else r[1]}"))
+             for r in rows],
+        )
+        total += len(rows)
+    conn.commit()
+    return total
+
+
+# ----------------------------------------------------------------- report ---
+# `report` consolidates the ad-hoc analysis scripts (analyze_*.py) into
+# one command. Every section is a function returning printable lines so
+# tests can assert on content; print_report only formats.
+
+def _all_dates(conn):
+    return [r[0] for r in conn.execute(
+        "SELECT DISTINCT target_date FROM snapshots ORDER BY target_date")]
+
+
+def _expected_business_date(now):
+    """Same rule as runner: the business date flips at ~06:00 JST."""
+    from datetime import timedelta
+    return (now - timedelta(hours=6)).date().isoformat()
+
+
+def _day_finals(conn, date):
+    """R3 final rows as dicts for one date."""
+    cols = ("shop_id", "cast_name", "target_date", "status_norm",
+            "status_raw", "shift", "work_hours", "cast_id",
+            "fetched_at", "age")
+    return [dict(zip(cols, r)) for r in conn.execute(
+        _final_sql("target_date = ?"), (date,)).fetchall()]
+
+
+def _ckey(row):
+    return str(row["cast_id"] if row["cast_id"] is not None
+               else row["cast_name"])
+
+
+def section_daily(conn, dates):
+    """Per-day R3 final-state counts with sold-out rate."""
+    lines = []
+    expected = _expected_business_date(now_jst())
+    for d in dates:
+        rows = _day_finals(conn, d)
+        c = Counter(r["status_norm"] for r in rows)
+        n = sum(c.values())
+        so = c.get("sold_out", 0)
+        mark = "  <- 巡回中" if d == expected else ""
+        lines.append(
+            f"  {d}: casts={n:4d}  sold_out={so:3d} "
+            f"({so / n * 100 if n else 0:4.1f}%)  low={c.get('low', 0):3d}  "
+            f"available={c.get('available', 0):4d}  "
+            f"closed={c.get('closed', 0):3d}  "
+            f"dummy={c.get('dummy', 0):2d}  unknown={c.get('unknown', 0):2d}"
+            f"{mark}")
+    return lines
+
+
+def section_streaks(conn, dates, streak_min=2):
+    """Casts with >= streak_min consecutive sold-out days (latest first).
+
+    The streak ends at the newest date; casts absent from the newest
+    date still show their run with today's state '-'.
+    """
+    by_cast = {}
+    names = {}
+    for d in dates:
+        for r in _day_finals(conn, d):
+            k = (r["shop_id"], _ckey(r))
+            by_cast.setdefault(k, {})[d] = r["status_norm"]
+            names[k] = (r["cast_name"], r["cast_id"])
+    lines = []
+    for k, m in by_cast.items():
+        streak = 0
+        for d in reversed(dates):
+            if m.get(d) == "sold_out":
+                streak += 1
+            else:
+                break
+        if streak < streak_min:
+            continue
+        today = m.get(dates[-1], "-")
+        nm = names[k]
+        lines.append((streak, today, k, nm))
+    lines.sort(key=lambda x: (-x[0], x[1] != "sold_out", str(x[3][0])))
+    return [
+        f"  {st}日連続完売: {nm[0]} (cast_id={nm[1]}, shop={k[0]})  "
+        f"最新日={today}"
+        for st, today, k, nm in lines]
+
+
+def section_timing(conn, dates):
+    """First sold_out observation per cast-day, by hour (fetched_at)."""
+    lines = []
+    for d in dates:
+        rows = conn.execute(
+            """SELECT MIN(fetched_at) AS fa
+               FROM snapshots
+               WHERE target_date = ? AND status_norm = 'sold_out'
+               GROUP BY shop_id,
+                        CAST(COALESCE(cast_id, cast_name) AS TEXT)""",
+            (d,)).fetchall()
+        hist = Counter(r[0][11:13] for r in rows if r[0])
+        late = sum(v for hh, v in hist.items() if hh < "06")
+        top = ", ".join(f"{hh}時:{n}" for hh, n in
+                        sorted(hist.items(), key=lambda x: -x[1])[:5])
+        lines.append(
+            f"  {d}: sold_out={len(rows):3d}人  深夜(00-05時)={late:3d}  "
+            f"集中帯: {top}")
+
+    # repeat sellers: first-observed sold_out hour across days
+    per_cast = conn.execute(
+        """SELECT shop_id, cast_name,
+                  CAST(COALESCE(cast_id, cast_name) AS TEXT) k,
+                  target_date, MIN(fetched_at)
+           FROM snapshots WHERE status_norm = 'sold_out'
+           GROUP BY 1, 3, 4""").fetchall()
+    by_cast = {}
+    for sid, name, k, d, fa in per_cast:
+        by_cast.setdefault((sid, name, k), {})[d] = fa[11:13]
+    names = {s: n for s, n in
+             conn.execute("SELECT shop_id, name FROM shops")}
+    regulars = sorted(
+        ((len(v), kk, v) for kk, v in by_cast.items() if len(v) >= 2),
+        key=lambda x: -x[0])
+    if regulars:
+        lines.append("  常連の完売時刻（2日以上完売, HH=初観測時）:")
+        for n, (sid, name, _), hours in regulars[:10]:
+            hh = ",".join(f"{d[5:]}={h}" for d, h in sorted(hours.items()))
+            lines.append(f"    {names.get(sid, sid)} - {name}: {hh}")
+    return lines
+
+
+def section_transitions(conn, dates):
+    """Cast churn + R3 state-transition matrix between the last two days."""
+    lines = []
+    if len(dates) < 2:
+        return lines + ["  (遷移分析には2営業日以上必要)"]
+    a, b = dates[-2], dates[-1]
+    prev = {(r["shop_id"], _ckey(r)): r["status_norm"]
+            for r in _day_finals(conn, a)}
+    curr = {(r["shop_id"], _ckey(r)): r["status_norm"]
+            for r in _day_finals(conn, b)}
+    both = set(prev) & set(curr)
+    lines.append(
+        f"  {a} -> {b}: 共通={len(both)}  消滅={len(prev) - len(both)}  "
+        f"新規={len(curr) - len(both)}")
+    trans = Counter((prev[k], curr[k]) for k in both)
+    for (x, y), n in trans.most_common(10):
+        lines.append(f"    {x:10s} -> {y:10s}  {n:4d}")
+    return lines
+
+
+def section_area(conn, date, top_n=15):
+    """Sold-out rate by shops.area for one date (R3 final)."""
+    area = {r[0]: (r[1] or "(未設定)") for r in conn.execute(
+        "SELECT shop_id, area FROM shops")}
+    agg = {}
+    for r in _day_finals(conn, date):
+        a = area.get(r["shop_id"], "(未設定)")
+        s = agg.setdefault(a, {"so": 0, "cast": 0, "shops": set()})
+        s["cast"] += 1
+        s["shops"].add(r["shop_id"])
+        if r["status_norm"] == "sold_out":
+            s["so"] += 1
+    ranked = sorted(agg.items(),
+                    key=lambda x: -x[1]["so"] / max(x[1]["cast"], 1))
+    return [
+        f"  {a[:24]:24s} sold_out={s['so']:3d}/{s['cast']:4d} "
+        f"({s['so'] / s['cast'] * 100:5.1f}%)  {len(s['shops'])}店"
+        for a, s in ranked[:top_n]]
+
+
+def section_shops(conn, date, top_n=15, min_casts=3):
+    """Top shops by sold-out rate for one date (R3 final)."""
+    name = {r[0]: r[1] for r in conn.execute(
+        "SELECT shop_id, name FROM shops")}
+    agg = {}
+    for r in _day_finals(conn, date):
+        s = agg.setdefault(r["shop_id"], {"so": 0, "cast": 0})
+        s["cast"] += 1
+        if r["status_norm"] == "sold_out":
+            s["so"] += 1
+    ranked = sorted(
+        ((sid, s) for sid, s in agg.items() if s["cast"] >= min_casts),
+        key=lambda x: -x[1]["so"] / x[1]["cast"])
+    return [
+        f"  {name.get(sid, '?')[:36]:36s} sold_out={s['so']:3d}/"
+        f"{s['cast']:3d} ({s['so'] / s['cast'] * 100:5.1f}%)"
+        for sid, s in ranked[:top_n]]
+
+
+def section_ranking(conn, date):
+    """Coverage + correlation of the latest weekly ranking.
+
+    Coverage is the real bottleneck found in the 10-27 analysis:
+    ranked casts on shops missing from shops.json are never observed,
+    so the report lists the worst gaps as an actionable watchlist diff.
+    """
+    lines = []
+    row = conn.execute(
+        "SELECT MAX(fetched_date) FROM cast_rankings").fetchone()
+    if not row or not row[0]:
+        return ["  (cast_rankings なし)"]
+    rd = row[0]
+    lines.append(f"  ranking fetched_date: {rd}")
+    ranked = {r[0] for r in conn.execute(
+        "SELECT DISTINCT cast_id FROM cast_rankings "
+        "WHERE period_type='weekly' AND fetched_date=?", (rd,))}
+    top10 = {r[0] for r in conn.execute(
+        "SELECT DISTINCT cast_id FROM cast_rankings "
+        "WHERE period_type='weekly' AND fetched_date=? AND rank<=10",
+        (rd,))}
+    finals = _day_finals(conn, date)
+    obs = {r["cast_id"] for r in finals if r["cast_id"] is not None}
+    so = {r["cast_id"] for r in finals
+          if r["status_norm"] == "sold_out" and r["cast_id"] is not None}
+    if ranked:
+        lines.append(
+            f"  掲載 cast={len(ranked)} / 観測={len(obs & ranked)} "
+            f"({len(obs & ranked) / len(ranked) * 100:.0f}%)  "
+            f"sold_out={len(so & ranked)}")
+        lines.append(
+            f"  top10 cast={len(top10)} / 観測={len(top10 & obs)}  "
+            f"sold_out={len(top10 & so)}")
+        rest = obs - top10
+        top_rate = (len(top10 & so) / len(top10 & obs)
+                    if top10 & obs else 0)
+        rest_rate = len(rest & so) / len(rest) if rest else 0
+        lines.append(
+            f"  sold_out率  top10観測分={top_rate * 100:.0f}%  vs  "
+            f"その他={rest_rate * 100:.0f}%")
+    unreg = conn.execute(
+        """SELECT cr.shop_id, cr.shop_name, COUNT(*) AS n, MIN(cr.rank) AS best
+           FROM cast_rankings cr
+           WHERE cr.fetched_date = ?
+             AND cr.shop_id NOT IN (SELECT shop_id FROM shops)
+           GROUP BY cr.shop_id ORDER BY best, n DESC LIMIT 10""",
+        (rd,)).fetchall()
+    if unreg:
+        lines.append("  未登録店（ランキング掲載だが巡回対象外）:")
+        for sid, nm, n, best in unreg:
+            lines.append(
+                f"    {sid} {nm[:34]:34s} ranked={n}人 best_rank={best}")
+    return lines
+
+
+def section_consistency(conn):
+    """Rename detection (one cast_id, several names) + NULL coverage."""
+    lines = []
+    ren = conn.execute(
+        """SELECT shop_id, cast_id, COUNT(DISTINCT cast_name) n,
+                  GROUP_CONCAT(DISTINCT cast_name)
+           FROM snapshots WHERE cast_id IS NOT NULL
+           GROUP BY shop_id, cast_id HAVING n > 1""").fetchall()
+    lines.append(f"  同cast_id→複数名（改名）: {len(ren)}組")
+    for sid, cid, n, names in ren[:10]:
+        lines.append(f"    shop={sid} id={cid} {names}")
+    tot = conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+    if tot:
+        lines.append("  NULL率:")
+        for fld in ("cast_id", "age", "shift", "work_minutes",
+                    "status_raw", "fetched_at"):
+            n = conn.execute(
+                f"SELECT COUNT(*) FROM snapshots WHERE {fld} IS NULL"
+            ).fetchone()[0]
+            lines.append(f"    {fld:14s} {n:6d} ({n / tot * 100:4.1f}%)")
+    return lines
+
+
+def section_forecast(conn, date, min_days=2, limit=20):
+    """Sell-out candidates for `date`: casts whose latest observation is
+    'low' (残りわずか) and whose history says they sell out often, plus
+    the leading-indicator stat (how often 'low' precedes sold_out)."""
+    lines = []
+
+    # leading indicator: share of sold_out cast-days that saw 'low'
+    # at least once before the winning sold_out observation
+    tot, with_low = conn.execute(
+        """WITH f AS (
+             SELECT shop_id, CAST(COALESCE(cast_id, cast_name) AS TEXT) k,
+                    target_date, status_norm,
+                    MIN(CASE WHEN status_norm='sold_out' THEN fetched_at END)
+                      first_so
+             FROM snapshots GROUP BY 1,2,3)
+           SELECT COUNT(*),
+                  SUM(CASE WHEN first_so IS NOT NULL AND EXISTS(
+                        SELECT 1 FROM snapshots s
+                        WHERE s.shop_id = f.shop_id
+                          AND CAST(COALESCE(s.cast_id, s.cast_name) AS TEXT) = f.k
+                          AND s.target_date = f.target_date
+                          AND s.status_norm = 'low'
+                          AND s.fetched_at < f.first_so)
+                      THEN 1 ELSE 0 END)
+           FROM f WHERE first_so IS NOT NULL""").fetchone()
+    if tot:
+        lines.append(
+            f"  完売cast-dayの {with_low}/{tot} "
+            f"({with_low / tot * 100:.0f}%) は完売前に「残りわずか」を観測"
+            "  <- この値が高いほど low は信頼できる予兆")
+
+    # today's 'low' casts, ranked by their sold-out track record
+    finals = {d: _day_finals(conn, d) for d in _all_dates(conn)}
+    hist = {}
+    for d, rows in finals.items():
+        if d >= date:
+            continue
+        for r in rows:
+            h = hist.setdefault((r["shop_id"], _ckey(r)), [0, 0])
+            h[1] += 1
+            h[0] += r["status_norm"] == "sold_out"
+    cands = []
+    for r in finals.get(date, []):
+        if r["status_norm"] != "low":
+            continue
+        so, n = hist.get((r["shop_id"], _ckey(r)), [0, 0])
+        if n >= min_days and so >= 1:
+            cands.append((so / n, so, n, r))
+    cands.sort(key=lambda x: (-x[0], -x[1]))
+    shop_names = {sid: name for sid, name in
+                  conn.execute("SELECT shop_id, name FROM shops")}
+    for rate, so, n, r in cands[:limit]:
+        lines.append(
+            f"  予兆 {shop_names.get(r['shop_id'], r['shop_id'])}"
+            f" - {r['cast_name']}: [{r['status_raw']}]"
+            f" (過去完売 {so}/{n}日, {rate:.0%})")
+    if not cands:
+        lines.append(f"  (履歴{min_days}日以上かつ現在 low のcastなし)")
+    return lines
+
+
+def _low_coverage_shops(conn, date):
+    """{shop_id: scrape-hours} for shops covered in anomalously few hours
+    on `date` (<40% of the per-shop median). Alerts from these shops may
+    be coverage artifacts, not real availability changes."""
+    per = conn.execute(
+        """SELECT shop_id, COUNT(DISTINCT substr(fetched_at, 12, 2))
+           FROM snapshots WHERE target_date = ? GROUP BY 1""",
+        (date,)).fetchall()
+    if not per:
+        return {}
+    med = sorted(h for _, h in per)[len(per) // 2]
+    return {s: h for s, h in per if h < max(2, med * 0.4)}
+
+
+def section_coverage(conn, dates):
+    """Scrape coverage audit: missing checkpoint hours, partial runs,
+    shops with anomalously low coverage on the latest day, and
+    duplicate scrapes within one hour."""
+    lines = []
+    for d in dates:
+        tot = conn.execute(
+            "SELECT COUNT(DISTINCT shop_id) FROM snapshots"
+            " WHERE target_date = ?", (d,)).fetchone()[0]
+        cov = dict(conn.execute(
+            """SELECT substr(fetched_at, 12, 2), COUNT(DISTINCT shop_id)
+               FROM snapshots WHERE target_date = ?
+               GROUP BY 1""", (d,)).fetchall())
+        # business-day hour order: 06..23 (day d) then 00..05 (day d+1)
+        grid = [f"{h:02d}" for h in list(range(6, 24)) + list(range(0, 6))]
+        seen = [h for h in grid if h in cov]
+        if not seen:
+            continue
+        first, last = seen[0], seen[-1]
+        missing = [h for h in grid[grid.index(first):grid.index(last) + 1]
+                   if h not in cov]
+        partial = [(h, n) for h, n in cov.items() if n < tot * 0.9]
+        dup = conn.execute(
+            """SELECT COUNT(*) FROM (
+                 SELECT 1 FROM snapshots WHERE target_date = ?
+                 GROUP BY shop_id, COALESCE(cast_id, cast_name),
+                          substr(fetched_at, 1, 13)
+                 HAVING COUNT(*) > 1)""", (d,)).fetchone()[0]
+        msg = f"  {d}: shops={tot}  取得時間帯={len(cov)}/{len(seen) + len(missing)}"
+        if missing:
+            msg += f"  未取得時間={','.join(missing)}時"
+        lines.append(msg)
+        for h, n in sorted(partial):
+            lines.append(f"    {h}時: {n}/{tot}店のみ "
+                         "(途中停止の可能性)")
+        if dup:
+            lines.append(f"    同一時間帯の重複巡回: {dup}件")
+
+    # shops with anomalously few scrape-hours on the latest day
+    d = dates[-1]
+    stale = _low_coverage_shops(conn, d)
+    if stale:
+        names = {s: n for s, n in
+                 conn.execute("SELECT shop_id, name FROM shops")}
+        lines.append(f"  {d} にほぼ取得できていない店:")
+        for s, h in sorted(stale.items(), key=lambda x: x[1]):
+            lines.append(f"    {s} {names.get(s, '?')}: {h}時間のみ")
+    return lines
+
+
+def section_runlog(conn, limit=8):
+    """Tail of the runner job log + per-shop scrape outcomes, when present."""
+    lines = []
+    try:
+        rows = conn.execute(
+            """SELECT job, started_at, status, detail FROM run_log
+               ORDER BY run_id DESC LIMIT ?""", (limit,)).fetchall()
+        stale = conn.execute(
+            """SELECT job, started_at FROM run_log
+               WHERE status = 'running'
+                 AND started_at < ?""",
+            ((now_jst() - timedelta(hours=2))
+             .strftime("%Y-%m-%d %H:%M:%S") + " JST",)).fetchall()
+    except sqlite3.OperationalError:
+        rows, stale = [], []
+    for job, st in stale:
+        lines.append(f"  !! 滞留run: {job} started {st} "
+                     "- 2時間超 running。runner 死亡の可能性")
+    lines += [
+        f"  {st} {job:10s} {status:7s} {detail or ''}"
+        for job, st, status, detail in rows] or ["  (run_log なし)"]
+
+    # per-shop scrape audit: hourly status counts for the latest day that
+    # has rows + the most recent fail/empty shops
+    try:
+        latest = conn.execute(
+            "SELECT substr(fetched_at,1,10) FROM scrape_log"
+            " ORDER BY log_id DESC LIMIT 1").fetchone()
+        if not latest:
+            return lines
+        hourly = conn.execute(
+            """SELECT substr(fetched_at,12,2) hh, status, COUNT(*)
+               FROM scrape_log WHERE substr(fetched_at,1,10)=?
+               GROUP BY 1,2 ORDER BY 1,2""", (latest[0],)).fetchall()
+        bad = conn.execute(
+            """SELECT substr(fetched_at,12,19), shop_id, status,
+                      substr(detail,1,40)
+               FROM scrape_log WHERE status!='ok'
+               ORDER BY log_id DESC LIMIT 10""").fetchall()
+    except sqlite3.OperationalError:
+        return lines
+    lines.append(f"  scrape_log {latest[0]} (ok/empty/fail per hour):")
+    hourmap = {}
+    for hh, st, n in hourly:
+        hourmap.setdefault(hh, {})[st] = n
+    for hh in sorted(hourmap):
+        s = hourmap[hh]
+        lines.append(f"    {hh}時 ok={s.get('ok', 0)} empty={s.get('empty', 0)}"
+                     f" fail={s.get('fail', 0)}")
+    if bad:
+        lines.append("  直近の empty/fail:")
+        lines += [f"    {fa} shop={sid} {st} {dt or ''}"
+                  for fa, sid, st, dt in bad]
+    return lines
+
+
+def print_report(conn, date=None, min_days=2, threshold=0.6,
+                 streak_min=2, top_n=15):
+    dates = _all_dates(conn)
+    if not dates:
+        print("report: snapshots が空です")
+        return
+    date = date or dates[-1]
+
+    def head(t):
+        print("\n" + "=" * 70)
+        print(t)
+        print("=" * 70)
+
+    head("【1】日次サマリー（R3最終状態）")
+    for line in section_daily(conn, dates):
+        print(line)
+    head(f"【2】完売ストリーク（{streak_min}日連続以上）")
+    for line in section_streaks(conn, dates, streak_min):
+        print(line)
+    head(f"【3】アラート: 普段完売なのに{date}は空き"
+         f"（min_days={min_days}, threshold={threshold}）")
+    alerts, considered = usually_sold_out_alert(
+        conn, date, min_days, threshold)
+    if not alerts:
+        print(f"  該当なし（履歴充分なcast: {considered}）")
+    low_cov = _low_coverage_shops(conn, date)
+    name2sid = {n: s for s, n in
+                conn.execute("SELECT shop_id, name FROM shops")}
+    for shop, cast, norm, raw, n_sold, n, rate in alerts:
+        gap = "  <<巡回欠損:この店の今日の取得が少ない>>" \
+            if name2sid.get(shop) in low_cov else ""
+        print(f"  ALERT {shop} - {cast}: {norm} [{raw}] "
+              f"(完売 {n_sold}/{n}日, {rate}){gap}")
+    head(f"【4】完売予兆（{date} 現在 low の注目cast）")
+    for line in section_forecast(conn, date, min_days):
+        print(line)
+    head("【5】完売の初観測タイミング")
+    for line in section_timing(conn, dates):
+        print(line)
+    head("【6】キャスト出入り・状態遷移")
+    for line in section_transitions(conn, dates):
+        print(line)
+    head(f"【7】エリア別 sold_out 率（{date}）")
+    for line in section_area(conn, date, top_n):
+        print(line)
+    head(f"【8】店舗別 sold_out 率 上位（{date}, 3名以上の店）")
+    for line in section_shops(conn, date, top_n):
+        print(line)
+    head(f"【9】週間ランキング照合（{date}）")
+    for line in section_ranking(conn, date):
+        print(line)
+    head("【10】cast整合性・データ品質")
+    for line in section_consistency(conn):
+        print(line)
+    head("【11】データカバレッジ監査")
+    for line in section_coverage(conn, dates):
+        print(line)
+    head("【12】runner ジョブ履歴")
+    for line in section_runlog(conn):
+        print(line)
+
+
 def run_demo():
     """In-memory proof that the alert logic triggers. NOT saved to disk.
 
@@ -356,6 +915,21 @@ def main(argv=None):
     p = sub.add_parser("demo", help="in-memory alert-logic test")
     p = sub.add_parser("verify", help="print DB counts")
     p.add_argument("--db", default=str(BASE / "estama.db"))
+    p = sub.add_parser("rollup", help="rebuild daily_cast_status from snapshots")
+    p.add_argument("--date", help="one business date (default: all)")
+    p.add_argument("--db", default=str(BASE / "estama.db"))
+    p = sub.add_parser("report", help="full analysis report")
+    p.add_argument("--date", help="focus date for area/shop/ranking sections "
+                                 "(default: latest target_date)")
+    p.add_argument("--min-days", type=int, default=2,
+                   help="alert: minimum prior observed days")
+    p.add_argument("--threshold", type=float, default=0.6,
+                   help="alert: sold-out rate over prior days")
+    p.add_argument("--streak-min", type=int, default=2,
+                   help="minimum consecutive sold-out days to list")
+    p.add_argument("--top", type=int, default=15,
+                   help="rows shown in area/shop sections")
+    p.add_argument("--db", default=str(BASE / "estama.db"))
 
     args = parser.parse_args(argv)
 
@@ -411,6 +985,15 @@ def main(argv=None):
         return 0
     if args.cmd == "verify":
         print_verify(conn)
+        return 0
+    if args.cmd == "rollup":
+        n = rollup_daily(conn, args.date)
+        print(f"rollup: daily_cast_status {n} rows"
+              + (f" (date {args.date})" if args.date else ""))
+        return 0
+    if args.cmd == "report":
+        print_report(conn, args.date, args.min_days, args.threshold,
+                     args.streak_min, args.top)
         return 0
     return 1
 
