@@ -14,7 +14,8 @@ from estama_tracker import (  # noqa: E402
     rollup_daily, section_daily, section_streaks,
     section_transitions, section_consistency,
     section_forecast, section_coverage, section_runlog,
-    section_rank_moves, section_watch,
+    section_rank_moves, section_watch, section_momentum,
+    section_new_casts, section_cast_detail,
     watch_add, watch_remove, build_notify_text, build_dashboard,
 )
 
@@ -275,6 +276,73 @@ html = build_dashboard(c, "2026-10-26")
 check("dashboard: cards + sections",
       "estama tracker" in html and "完売（1人）" in html
       and "アラート" in html and "ランキング変動" in html)
+
+# 16. momentum: x-count growth = bookings in flight
+c = fresh()
+c.execute(
+    "INSERT INTO snapshots (shop_id, cast_name, cast_id, status_raw,"
+    " status_norm, slot_pattern, target_date, fetched_at)"
+    " VALUES (1, '人気', 50, 'low', 'low', '○19コマ / ×0コマ (予約可)',"
+    " '2026-10-26', '2026-10-26 10:00:00 JST')")
+c.execute(
+    "INSERT INTO snapshots (shop_id, cast_name, cast_id, status_raw,"
+    " status_norm, slot_pattern, target_date, fetched_at)"
+    " VALUES (1, '人気', 50, 'low', 'low', '○4コマ / ×9コマ (予約可)',"
+    " '2026-10-26', '2026-10-26 12:00:00 JST')")
+c.execute(
+    "INSERT INTO snapshots (shop_id, cast_name, cast_id, status_raw,"
+    " status_norm, slot_pattern, target_date, fetched_at)"
+    " VALUES (1, '閑散', 51, 'ok', 'available', '○15コマ / ×0コマ (予約可)',"
+    " '2026-10-26', '2026-10-26 10:00:00 JST')")
+lines = section_momentum(c, "2026-10-26")
+check("section_momentum: booking growth detected",
+      any("人気" in l and "9枠消化" in l for l in lines)
+      and not any("閑散" in l for l in lines))
+
+# 17. new casts + transfers
+c = fresh()
+add(c, "ベテラン", "2026-10-25", "available", "2026-10-25 12:00:00 JST",
+    cast_id=60)
+add(c, "ルーキー", "2026-10-26", "available", "2026-10-26 12:00:00 JST",
+    cast_id=61)
+add(c, "移籍子", "2026-10-25", "available", "2026-10-25 12:00:00 JST",
+    cast_id=62)
+c.execute("INSERT INTO shops VALUES (9, '別店', '難波', NULL, NULL)")
+c.execute(
+    "INSERT INTO snapshots (shop_id, cast_name, cast_id, status_raw,"
+    " status_norm, target_date, fetched_at)"
+    " VALUES (9, '移籍子', 62, 'ok', 'available',"
+    " '2026-10-26', '2026-10-26 12:00:00 JST')")
+lines = section_new_casts(c, "2026-10-26")
+check("section_new_casts: debut + transfer",
+      any("新規cast（2026-10-26 初登場）: 1人" in l for l in lines)
+      and any("移籍子" in l and "別店" in l for l in lines))
+
+# 18. cast detail: attendance + sell-out hours + totals
+c = fresh()
+for i, (d, st) in enumerate([
+        ("2026-10-26", "sold_out"), ("2026-10-27", "sold_out"),
+        ("2026-10-28", "available")]):
+    add(c, "詳細子", d, st, f"{d} 18:00:00 JST", cast_id=70)
+rollup_daily(c)
+lines = section_cast_detail(c, 1, cast_id=70)
+check("section_cast_detail: profile",
+      any("出勤曜日傾向" in l and "月: 1日" in l for l in lines)
+      and any("完売時刻" in l for l in lines)
+      and any("完売 2日 (67%)" in l for l in lines))
+
+# 19. notify additions: watch sold_out + momentum + runner fail
+c = fresh()
+add(c, "常連", "2026-10-26", "sold_out", "2026-10-26 12:00:00 JST",
+    cast_id=10)
+rollup_daily(c)
+watch_add(c, 1, cast_id=10)
+c.execute(
+    "INSERT INTO run_log (job, started_at, status, detail)"
+    " VALUES ('checkpoint', '2020-01-01 00:00:00 JST', 'fail', 'oops')")
+text = build_notify_text(c, "2026-10-26")
+check("notify: watch sold_out + runner fail",
+      "ウォッチ中のcastが完売" in text and "runner失敗" in text)
 
 print("\nRESULT:", "ALL PASS" if not fails else f"FAILURES: {fails}")
 sys.exit(1 if fails else 0)
