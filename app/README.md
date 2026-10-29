@@ -64,8 +64,8 @@ python3 -m venv venv
 # 日次ロールアップ再計算（runner が取り込み後に自動実行）
 ./venv/bin/python app/estama_tracker.py rollup
 
-# 全セクション分析レポート（日次サマリー/ストリーク/アラート/タイミング/
-# 遷移/エリア/店舗/ランキング照合/品質/runner履歴）
+# 全セクション分析レポート（日次サマリー/ストリーク/アラート/完売予兆/
+# タイミング/遷移/エリア/店舗/ランキング照合/品質/カバレッジ監査/runner履歴）
 ./venv/bin/python app/estama_tracker.py report --date 2026-10-28
 ```
 

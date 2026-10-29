@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 from estama_tracker import (  # noqa: E402
     rollup_daily, section_daily, section_streaks,
     section_transitions, section_consistency,
+    section_forecast, section_coverage,
 )
 
 SCHEMA = (Path(__file__).resolve().parent.parent / "app" / "schema.sql").read_text()
@@ -122,6 +123,40 @@ add(c, "新名", "2026-10-26", "available", "2026-10-26 18:00:00 JST", cast_id=5
 lines = section_consistency(c)
 check("section_consistency: rename detected",
       any("1組" in l for l in lines))
+
+# 9. forecast: 'low' today + sold-out history = candidate
+c = fresh()
+add(c, "L", "2026-10-26", "sold_out", "2026-10-26 20:00:00 JST", cast_id=9)
+add(c, "L", "2026-10-27", "sold_out", "2026-10-27 20:00:00 JST", cast_id=9)
+add(c, "L", "2026-10-28", "low", "2026-10-28 20:00:00 JST", cast_id=9)
+add(c, "N", "2026-10-26", "available", "2026-10-26 20:00:00 JST", cast_id=8)
+add(c, "N", "2026-10-27", "available", "2026-10-27 20:00:00 JST", cast_id=8)
+add(c, "N", "2026-10-28", "low", "2026-10-28 20:00:00 JST", cast_id=8)
+lines = section_forecast(c, "2026-10-28", min_days=2)
+check("section_forecast: only proven candidates",
+      len(lines) == 2 and "L" in lines[1] and "N" not in lines[1])
+
+# 10. coverage: missing hours + stale shop detection
+c = fresh()
+for h in (6, 7, 9):   # hour 8 missing
+    add(c, "A", "2026-10-26", "available",
+        f"2026-10-26 {h:02d}:35:00 JST", cast_id=1)
+add(c, "B", "2026-10-26", "available", "2026-10-26 06:35:00 JST", cast_id=2)
+lines = section_coverage(c, ["2026-10-26"])
+check("section_coverage: missing hour detected",
+      any("未取得時間=08" in l for l in lines))
+
+# stale shop: one shop scraped in far fewer hours than the median
+c = fresh()
+c.execute("INSERT INTO shops VALUES (2, 'テスト店2', '難波', NULL, NULL)")
+for h in range(6, 12):
+    add(c, "A", "2026-10-26", "available",
+        f"2026-10-26 {h:02d}:35:00 JST", cast_id=1)
+add(c, "B", "2026-10-26", "available", "2026-10-26 06:35:00 JST", cast_id=2)
+c.execute("UPDATE snapshots SET shop_id=2 WHERE cast_name='B'")
+lines = section_coverage(c, ["2026-10-26"])
+check("section_coverage: stale shop flagged",
+      any("1時間のみ" in l for l in lines))
 
 print("\nRESULT:", "ALL PASS" if not fails else f"FAILURES: {fails}")
 sys.exit(1 if fails else 0)
