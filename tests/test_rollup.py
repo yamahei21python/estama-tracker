@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 from estama_tracker import (  # noqa: E402
     rollup_daily, section_daily, section_streaks,
     section_transitions, section_consistency,
-    section_forecast, section_coverage,
+    section_forecast, section_coverage, section_runlog,
 )
 
 SCHEMA = (Path(__file__).resolve().parent.parent / "app" / "schema.sql").read_text()
@@ -81,6 +81,20 @@ add(c, "新名", "2026-10-26", "available", "2026-10-26 18:00:00 JST", cast_id=5
 rollup_daily(c)
 rows = roll(c)
 check("rollup: rename = 1 row", len(rows) == 1 and rows[0][1] == "55")
+
+# 4b. first_sold_out_at = earliest sold_out observation that day
+c = fresh()
+add(c, "A", "2026-10-26", "available", "2026-10-26 12:00:00 JST", cast_id=10)
+add(c, "A", "2026-10-26", "sold_out", "2026-10-26 18:00:00 JST", cast_id=10)
+add(c, "A", "2026-10-26", "sold_out", "2026-10-26 20:00:00 JST", cast_id=10)
+add(c, "B", "2026-10-26", "available", "2026-10-26 12:00:00 JST", cast_id=11)
+rollup_daily(c)
+fa = {r[3]: r[7] for r in c.execute(
+    "SELECT shop_id, cast_key, cast_id, cast_name, target_date,"
+    " status_norm, fetched_at, first_sold_out_at"
+    " FROM daily_cast_status")}
+check("rollup: first_sold_out_at persisted",
+      fa["A"] == "2026-10-26 18:00:00 JST" and fa["B"] is None)
 
 # 5. section_daily counts use R3 states
 c = fresh()
@@ -156,7 +170,20 @@ add(c, "B", "2026-10-26", "available", "2026-10-26 06:35:00 JST", cast_id=2)
 c.execute("UPDATE snapshots SET shop_id=2 WHERE cast_name='B'")
 lines = section_coverage(c, ["2026-10-26"])
 check("section_coverage: stale shop flagged",
-      any("1時間のみ" in l for l in lines))
+      any("2 テスト店2" in l and "1時間のみ" in l for l in lines))
+
+# 11. run_log: stale 'running' (dead runner) is flagged
+c = fresh()
+c.execute(
+    "INSERT INTO run_log (job, started_at, status)"
+    " VALUES ('checkpoint', '2020-01-01 00:00:00 JST', 'running')")
+c.execute(
+    "INSERT INTO run_log (job, started_at, status)"
+    " VALUES ('prune', '2020-01-01 00:05:00 JST', 'ok')")
+lines = section_runlog(c)
+check("section_runlog: stale running flagged",
+      any("滞留run" in l and "checkpoint" in l for l in lines)
+      and not any("滞留run" in l and "prune" in l for l in lines))
 
 print("\nRESULT:", "ALL PASS" if not fails else f"FAILURES: {fails}")
 sys.exit(1 if fails else 0)

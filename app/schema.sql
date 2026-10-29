@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS daily_cast_status (
     work_hours  REAL,
     age         INTEGER,
     fetched_at  TEXT,              -- timestamp of the winning observation
+    first_sold_out_at TEXT,        -- earliest sold_out fetched_at that day (NULL if never)
     PRIMARY KEY (shop_id, cast_key, target_date)
 );
 

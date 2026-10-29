@@ -226,8 +226,14 @@ def import_rankings_into_db(data_list, db_path=DEFAULT_DB):
     return total_inserted
 
 
-def sync_top_shops_to_watchlist(data_list, shops_json_path=DEFAULT_SHOPS_JSON, top_n=10):
-    """Extract shops of top-ranked casts and add missing ones to shops.json."""
+def sync_top_shops_to_watchlist(data_list, shops_json_path=DEFAULT_SHOPS_JSON,
+                                top_n=10):
+    """Extract shops of top-ranked casts and add missing ones to shops.json.
+
+    top_n=10 keeps the historical behaviour; pass a larger bound (e.g. 30,
+    the full organic list) to auto-add every ranked shop and close the
+    ~60% coverage gap between ranked casts and the watchlist.
+    """
     current_data = load_json(shops_json_path, default={"shops": []})
 
     existing_ids = {int(s["shop_id"]) for s in current_data.get("shops", [])}
@@ -244,6 +250,7 @@ def sync_top_shops_to_watchlist(data_list, shops_json_path=DEFAULT_SHOPS_JSON, t
                     "shop_id": sid,
                     "name": item["shop_name"],
                     "area": data["area_name"],
+                    "source": "ranking",
                     "source_url": f"https://estama.jp/shop/{sid}/schedule/"
                 })
                 new_shops_added += 1
@@ -269,6 +276,8 @@ def main():
     parser.add_argument("--import-db", action="store_true", help="Import rankings into estama.db (cast_rankings table)")
     parser.add_argument("--save-json", action="store_true", help="Save ranking results to JSON snapshot files")
     parser.add_argument("--sync-watchlist", action="store_true", help="Add top ranked casts' shops to shops.json watchlist")
+    parser.add_argument("--sync-max-rank", type=int, default=10,
+                        help="Max rank whose shop is synced (default: 10; 30 = every organically ranked shop)")
     parser.add_argument("--db", type=str, default=str(DEFAULT_DB), help=f"Database path (default: {DEFAULT_DB})")
     parser.add_argument("--json", action="store_true", help="Output JSON directly to stdout")
 
@@ -309,8 +318,8 @@ def main():
         print(f"{COLOR_GREEN}✅ Successfully imported {cnt} ranking rows into {args.db}!{COLOR_RESET}")
 
     if args.sync_watchlist:
-        added = sync_top_shops_to_watchlist(all_results)
-        print(f"{COLOR_GREEN}✅ Synced watchlist: {added} new top-ranked shops added to shops.json!{COLOR_RESET}")
+        added = sync_top_shops_to_watchlist(all_results, top_n=args.sync_max_rank)
+        print(f"{COLOR_GREEN}✅ Synced watchlist: {added} new ranked shops added to shops.json!{COLOR_RESET}")
 
 
 if __name__ == "__main__":

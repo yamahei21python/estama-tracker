@@ -587,7 +587,8 @@ def job_checkpoint() -> str:
 def job_ranking() -> str:
     maybe_archive(now_jst())
     run_scraper(["ranking_scraper.py", "--area", "all", "--import-db",
-                 "--save-json", "--sync-watchlist"], timeout=600)
+                 "--save-json", "--sync-watchlist",
+                 "--sync-max-rank", "30"], timeout=600)
     run_scraper(["estama_tracker.py", "rollup"])  # refresh daily_cast_status
     enforce_ban()   # a sync must never resurrect a banned shop
     banned = job_prune()  # daily: ban shops w/ 20+ observed days, zero sell-outs

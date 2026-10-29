@@ -31,6 +31,7 @@ import json
 import sqlite3
 import sys
 from collections import Counter
+from datetime import timedelta
 from pathlib import Path
 
 from common import (BASE_DIR as BASE, SCHEMA_PATH as SCHEMA,
@@ -282,6 +283,14 @@ def rollup_daily(conn, date=None):
     that, making alert history, sold-out streaks and trends a plain
     table lookup instead of a window pass. Returns rows written.
     """
+    # first_sold_out_at landed after the table shipped; upgrade old DBs
+    cols = {r[1] for r in conn.execute(
+        "PRAGMA table_info(daily_cast_status)")}
+    if "first_sold_out_at" not in cols:
+        conn.execute(
+            "ALTER TABLE daily_cast_status"
+            " ADD COLUMN first_sold_out_at TEXT")
+
     if date:
         days = [date]
     else:
@@ -290,15 +299,24 @@ def rollup_daily(conn, date=None):
     total = 0
     for d in days:
         rows = conn.execute(_final_sql("target_date = ?"), (d,)).fetchall()
+        first_so = {f"{s}|{k}": fa for s, k, fa in conn.execute(
+            """SELECT shop_id, CAST(COALESCE(cast_id, cast_name) AS TEXT),
+                      MIN(fetched_at)
+               FROM snapshots
+               WHERE target_date = ? AND status_norm = 'sold_out'
+               GROUP BY 1, 2""", (d,)).fetchall()}
         conn.execute(
             "DELETE FROM daily_cast_status WHERE target_date = ?", (d,))
         conn.executemany(
             """INSERT INTO daily_cast_status
                (shop_id, cast_key, cast_id, cast_name, target_date,
-                status_norm, status_raw, work_hours, age, fetched_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                status_norm, status_raw, work_hours, age, fetched_at,
+                first_sold_out_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [(r[0], str(r[7] if r[7] is not None else r[1]), r[7], r[1],
-              r[2], r[3], r[4], r[6], r[9], r[8]) for r in rows],
+              r[2], r[3], r[4], r[6], r[9], r[8],
+              first_so.get(f"{r[0]}|{r[7] if r[7] is not None else r[1]}"))
+             for r in rows],
         )
         total += len(rows)
     conn.commit()
@@ -406,6 +424,27 @@ def section_timing(conn, dates):
         lines.append(
             f"  {d}: sold_out={len(rows):3d}人  深夜(00-05時)={late:3d}  "
             f"集中帯: {top}")
+
+    # repeat sellers: first-observed sold_out hour across days
+    per_cast = conn.execute(
+        """SELECT shop_id, cast_name,
+                  CAST(COALESCE(cast_id, cast_name) AS TEXT) k,
+                  target_date, MIN(fetched_at)
+           FROM snapshots WHERE status_norm = 'sold_out'
+           GROUP BY 1, 3, 4""").fetchall()
+    by_cast = {}
+    for sid, name, k, d, fa in per_cast:
+        by_cast.setdefault((sid, name, k), {})[d] = fa[11:13]
+    names = {s: n for s, n in
+             conn.execute("SELECT shop_id, name FROM shops")}
+    regulars = sorted(
+        ((len(v), kk, v) for kk, v in by_cast.items() if len(v) >= 2),
+        key=lambda x: -x[0])
+    if regulars:
+        lines.append("  常連の完売時刻（2日以上完売, HH=初観測時）:")
+        for n, (sid, name, _), hours in regulars[:10]:
+            hh = ",".join(f"{d[5:]}={h}" for d, h in sorted(hours.items()))
+            lines.append(f"    {names.get(sid, sid)} - {name}: {hh}")
     return lines
 
 
@@ -607,6 +646,20 @@ def section_forecast(conn, date, min_days=2, limit=20):
     return lines
 
 
+def _low_coverage_shops(conn, date):
+    """{shop_id: scrape-hours} for shops covered in anomalously few hours
+    on `date` (<40% of the per-shop median). Alerts from these shops may
+    be coverage artifacts, not real availability changes."""
+    per = conn.execute(
+        """SELECT shop_id, COUNT(DISTINCT substr(fetched_at, 12, 2))
+           FROM snapshots WHERE target_date = ? GROUP BY 1""",
+        (date,)).fetchall()
+    if not per:
+        return {}
+    med = sorted(h for _, h in per)[len(per) // 2]
+    return {s: h for s, h in per if h < max(2, med * 0.4)}
+
+
 def section_coverage(conn, dates):
     """Scrape coverage audit: missing checkpoint hours, partial runs,
     shops with anomalously low coverage on the latest day, and
@@ -647,20 +700,13 @@ def section_coverage(conn, dates):
 
     # shops with anomalously few scrape-hours on the latest day
     d = dates[-1]
-    per = conn.execute(
-        """SELECT shop_id, COUNT(DISTINCT substr(fetched_at, 12, 2))
-           FROM snapshots WHERE target_date = ? GROUP BY 1""",
-        (d,)).fetchall()
-    if per:
-        med = sorted(h for _, h in per)[len(per) // 2]
+    stale = _low_coverage_shops(conn, d)
+    if stale:
         names = {s: n for s, n in
                  conn.execute("SELECT shop_id, name FROM shops")}
-        stale = [(s, h) for s, h in per if h < max(2, med * 0.4)]
-        if stale:
-            lines.append(f"  {d} にほぼ取得できていない店 "
-                         f"(時間帯カバー {med}時間が中央値):")
-            for s, h in stale:
-                lines.append(f"    {s} {names.get(s, '?')}: {h}時間のみ")
+        lines.append(f"  {d} にほぼ取得できていない店:")
+        for s, h in sorted(stale.items(), key=lambda x: x[1]):
+            lines.append(f"    {s} {names.get(s, '?')}: {h}時間のみ")
     return lines
 
 
@@ -671,8 +717,17 @@ def section_runlog(conn, limit=8):
         rows = conn.execute(
             """SELECT job, started_at, status, detail FROM run_log
                ORDER BY run_id DESC LIMIT ?""", (limit,)).fetchall()
+        stale = conn.execute(
+            """SELECT job, started_at FROM run_log
+               WHERE status = 'running'
+                 AND started_at < ?""",
+            ((now_jst() - timedelta(hours=2))
+             .strftime("%Y-%m-%d %H:%M:%S") + " JST",)).fetchall()
     except sqlite3.OperationalError:
-        rows = []
+        rows, stale = [], []
+    for job, st in stale:
+        lines.append(f"  !! 滞留run: {job} started {st} "
+                     "- 2時間超 running。runner 死亡の可能性")
     lines += [
         f"  {st} {job:10s} {status:7s} {detail or ''}"
         for job, st, status, detail in rows] or ["  (run_log なし)"]
@@ -736,9 +791,14 @@ def print_report(conn, date=None, min_days=2, threshold=0.6,
         conn, date, min_days, threshold)
     if not alerts:
         print(f"  該当なし（履歴充分なcast: {considered}）")
+    low_cov = _low_coverage_shops(conn, date)
+    name2sid = {n: s for s, n in
+                conn.execute("SELECT shop_id, name FROM shops")}
     for shop, cast, norm, raw, n_sold, n, rate in alerts:
+        gap = "  <<巡回欠損:この店の今日の取得が少ない>>" \
+            if name2sid.get(shop) in low_cov else ""
         print(f"  ALERT {shop} - {cast}: {norm} [{raw}] "
-              f"(完売 {n_sold}/{n}日, {rate})")
+              f"(完売 {n_sold}/{n}日, {rate}){gap}")
     head(f"【4】完売予兆（{date} 現在 low の注目cast）")
     for line in section_forecast(conn, date, min_days):
         print(line)
