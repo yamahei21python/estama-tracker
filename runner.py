@@ -580,7 +580,6 @@ def job_checkpoint() -> str:
     log(f"checkpoint: snapshots {before} -> {after} (+{after - before})")
     if after <= before:
         raise RuntimeError("checkpoint imported no new rows - refusing to upload")
-    publish()
     return f"snapshots +{after - before} ({before} -> {after})"
 
 
@@ -615,7 +614,6 @@ def job_ranking() -> str:
     run_scraper(["estama_tracker.py", "rollup"])  # refresh daily_cast_status
     enforce_ban()   # a sync must never resurrect a banned shop
     banned = job_prune()  # daily: ban shops w/ 20+ observed days, zero sell-outs
-    publish()
     # shops.json is part of the deliverable too
     storage_put("shops.json", APP / "shops.json")
     log("ranking: shops.json uploaded")
@@ -646,7 +644,16 @@ def main() -> int:
     except Exception as exc:  # report, never crash the schedule silently
         log(f"FAIL {job}: {type(exc).__name__}: {exc}")
         run_log_close(run_id, "fail", f"{type(exc).__name__}: {exc}")
+        publish()  # the published DB must carry the 'fail' row too
         return 1
+    # publish only AFTER run_log_close: the distributed DB's newest
+    # run_log row must show the final status, not a stale 'running'
+    # (section_runlog flags running rows older than 2h as suspected
+    # runner death - a stale 'running' would false-positive)
+    try:
+        publish()
+    except Exception as exc:
+        log(f"publish failed after ok: {type(exc).__name__}: {exc}")
     log(f"DONE {job}")
     return 0
 

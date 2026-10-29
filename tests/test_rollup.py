@@ -294,10 +294,29 @@ c.execute(
     " status_norm, slot_pattern, target_date, fetched_at)"
     " VALUES (1, '閑散', 51, 'ok', 'available', '○15コマ / ×0コマ (予約可)',"
     " '2026-10-26', '2026-10-26 10:00:00 JST')")
+# sold out then flipped back to closed at shift end: R3 final is
+# sold_out, so the cast must NOT appear as 'still booking' momentum
+c.execute(
+    "INSERT INTO snapshots (shop_id, cast_name, cast_id, status_raw,"
+    " status_norm, slot_pattern, target_date, fetched_at)"
+    " VALUES (1, '完売済', 52, 'ok', 'available', '○10コマ / ×0コマ (予約可)',"
+    " '2026-10-26', '2026-10-26 10:00:00 JST')")
+c.execute(
+    "INSERT INTO snapshots (shop_id, cast_name, cast_id, status_raw,"
+    " status_norm, slot_pattern, target_date, fetched_at)"
+    " VALUES (1, '完売済', 52, 'soldout', 'sold_out', '○0コマ / ×6コマ',"
+    " '2026-10-26', '2026-10-26 12:00:00 JST')")
+c.execute(
+    "INSERT INTO snapshots (shop_id, cast_name, cast_id, status_raw,"
+    " status_norm, slot_pattern, target_date, fetched_at)"
+    " VALUES (1, '完売済', 52, 'closed', 'closed', NULL,"
+    " '2026-10-26', '2026-10-26 23:00:00 JST')")
 lines = section_momentum(c, "2026-10-26")
 check("section_momentum: booking growth detected",
       any("人気" in l and "9枠消化" in l for l in lines)
       and not any("閑散" in l for l in lines))
+check("section_momentum: sold_out (R3) excluded",
+      not any("完売済" in l for l in lines))
 
 # 17. new casts + transfers
 c = fresh()

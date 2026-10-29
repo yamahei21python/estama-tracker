@@ -736,7 +736,11 @@ def section_rank_moves(conn, period_type="weekly", min_delta=5, limit=15):
         ((prev[c][0] - now[c][0], c, now[c]) for c in now.keys() & prev.keys()
          if abs(prev[c][0] - now[c][0]) >= min_delta),
         key=lambda x: x[0])
-    for delta, cid, (rk, nm, shop) in moved[:limit]:
+    # risers and fallers each get a share of the limit so a day of many
+    # drops can't crowd every riser out of the report
+    ups = [m for m in moved if m[0] > 0][:limit // 2]
+    downs = [m for m in moved if m[0] < 0][:limit - len(ups)]
+    for delta, cid, (rk, nm, shop) in ups + downs:
         lines.append(
             f"    {'↑' if delta > 0 else '↓'} {nm} ({shop[:16]}): "
             f"{prev[cid][0]}位 -> {rk}位")
@@ -844,9 +848,15 @@ def section_momentum(conn, date, min_booked=4, limit=15):
         ent["last"], ent["fa1"] = sc, fa
     names = {s: n for s, n in
              conn.execute("SELECT shop_id, name FROM shops")}
+    # R3 final states: a cast that sold out and then flipped to 'closed'
+    # at shift end must count as sold_out, not as 'still bookable'
+    sold_out_finals = {(r["shop_id"], _ckey(r))
+                       for r in _day_finals(conn, date)
+                       if r["status_norm"] == "sold_out"}
     cands = []
     for (sid, ck), e in per.items():
-        if e["norm"] == "sold_out" or e["first"] is None:
+        if e["norm"] == "sold_out" or (sid, ck) in sold_out_finals \
+                or e["first"] is None:
             continue
         o0, x0 = e["first"]
         o1, x1 = e["last"]
@@ -878,12 +888,17 @@ def section_new_casts(conn, date, transfer_days=14):
     first_seen = dict(conn.execute(
         """SELECT CAST(COALESCE(cast_id, cast_name) AS TEXT),
                   MIN(target_date) FROM snapshots GROUP BY 1"""))
-    newc = [r for r in conn.execute(
-        """SELECT DISTINCT s.shop_id, s.cast_name, s.cast_id
-           FROM snapshots s
-           WHERE s.target_date = ?""", (date,)).fetchall()
-        if first_seen.get(
-            str(r[2] if r[2] is not None else r[1])) == date]
+    # one row per (shop, cast_key); a mid-day rename must not count
+    # the same cast_id twice - keep the latest observed name
+    latest = {}
+    for sid, cname, ck in conn.execute(
+            """SELECT s.shop_id, s.cast_name,
+                      CAST(COALESCE(s.cast_id, s.cast_name) AS TEXT)
+               FROM snapshots s WHERE s.target_date = ?
+               ORDER BY s.fetched_at""", (date,)).fetchall():
+        latest[(sid, ck)] = cname
+    newc = [(sid, cname, ck) for (sid, ck), cname in latest.items()
+            if first_seen.get(ck) == date]
     names = {s: n for s, n in
              conn.execute("SELECT shop_id, name FROM shops")}
     if newc:
@@ -1241,10 +1256,12 @@ def build_notify_text(conn, date, min_days=2, threshold=0.6, limit=8):
     if ev and ev[0]:
         parts.append(f"■ 本日の予兆採点(速報): low→完売 {ev[1]}/{ev[0]}")
     moves = [l for l in section_rank_moves(conn)
-             if "新規IN" in l or "圏外OUT" in l]
+             if any(t in l for t in ("↑", "↓", "新規IN", "圏外OUT"))]
     if moves:
         parts.append("■ ランキング変動:")
-        parts += moves
+        parts += moves[:8]
+        if len(moves) > 8:
+            parts.append(f"  ...他 {len(moves) - 8}件")
     mom = [l for l in section_momentum(conn, date) if "勢い" in l]
     if mom:
         parts.append("■ 予約の勢い（枠消化中）:")
