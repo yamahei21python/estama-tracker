@@ -584,6 +584,54 @@
       "name": "Restpia（レストピア）",
       "area": "高槻・茨木",
       "source_url": "https://estama.jp/shop/33228/schedule/"
+    },
+    {
+      "shop_id": 38664,
+      "name": "CELEB SPA PREMIUM　～セレブスパプレミアム～",
+      "area": "梅田・大阪駅",
+      "source_url": "https://estama.jp/shop/38664/schedule/"
+    },
+    {
+      "shop_id": 43254,
+      "name": "Un Secret（アンスクレ）",
+      "area": "日本橋",
+      "source_url": "https://estama.jp/shop/43254/schedule/"
+    },
+    {
+      "shop_id": 39550,
+      "name": "桃源郷　堺筋本町店",
+      "area": "堺筋本町・本町・阿波座",
+      "source_url": "https://estama.jp/shop/39550/schedule/"
+    },
+    {
+      "shop_id": 28241,
+      "name": "Seven Luck Spa",
+      "area": "堺筋本町・本町・阿波座",
+      "source_url": "https://estama.jp/shop/28241/schedule/"
+    },
+    {
+      "shop_id": 44056,
+      "name": "YOLU SPA 大阪店 天王寺ルーム",
+      "area": "天王寺・谷町",
+      "source_url": "https://estama.jp/shop/44056/schedule/"
+    },
+    {
+      "shop_id": 30654,
+      "name": "極SPA",
+      "area": "十三・新大阪・西中島",
+      "source_url": "https://estama.jp/shop/30654/schedule/"
+    },
+    {
+      "shop_id": 43928,
+      "name": "赤まむし",
+      "area": "十三・新大阪・西中島",
+      "source_url": "https://estama.jp/shop/43928/schedule/"
+    },
+    {
+      "shop_id": 46863,
+      "name": "YOLU SPA（ヨルスパ）堺東店",
+      "area": "堺・堺東・我孫子",
+      "source_url": "https://estama.jp/shop/46863/schedule/"
     }
   ],
   "status": "CONFIGURED",
