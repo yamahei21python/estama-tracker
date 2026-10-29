@@ -111,5 +111,24 @@ check("run_log open/close lifecycle",
       and row[3] is not None)
 con.close()
 
+# scrape_log: per-shop audit links back to its run via ESTAMA_RUN_ID
+sys.path.insert(0, str(ROOT / "app"))
+from common import log_scrape  # noqa: E402
+
+os.environ["ESTAMA_RUN_ID"] = str(rid)
+log_scrape(db, 40900, "ok", 42)
+log_scrape(db, 39488, "fail", 0, "HTTP 503")
+os.environ.pop("ESTAMA_RUN_ID")
+log_scrape(db, 30039, "empty", 0)
+con = sqlite3.connect(db)
+rows = con.execute(
+    "SELECT run_id, shop_id, status, rows, detail FROM scrape_log"
+    " ORDER BY log_id").fetchall()
+check("scrape_log links run + records outcomes",
+      rows[0][0] == rid and rows[0][1] == 40900 and rows[0][3] == 42
+      and rows[1][2] == "fail" and "503" in rows[1][4]
+      and rows[2][0] is None and rows[2][2] == "empty")
+con.close()
+
 print("\nRESULT:", "ALL PASS" if not fails else f"FAILURES: {fails}")
 sys.exit(1 if fails else 0)

@@ -547,18 +547,50 @@ def section_consistency(conn):
 
 
 def section_runlog(conn, limit=8):
-    """Tail of the runner job log, when the table has rows."""
+    """Tail of the runner job log + per-shop scrape outcomes, when present."""
+    lines = []
     try:
         rows = conn.execute(
             """SELECT job, started_at, status, detail FROM run_log
                ORDER BY run_id DESC LIMIT ?""", (limit,)).fetchall()
     except sqlite3.OperationalError:
-        return ["  (run_log なし)"]
-    if not rows:
-        return ["  (run_log なし)"]
-    return [
+        rows = []
+    lines += [
         f"  {st} {job:10s} {status:7s} {detail or ''}"
-        for job, st, status, detail in rows]
+        for job, st, status, detail in rows] or ["  (run_log なし)"]
+
+    # per-shop scrape audit: hourly status counts for the latest day that
+    # has rows + the most recent fail/empty shops
+    try:
+        latest = conn.execute(
+            "SELECT substr(fetched_at,1,10) FROM scrape_log"
+            " ORDER BY log_id DESC LIMIT 1").fetchone()
+        if not latest:
+            return lines
+        hourly = conn.execute(
+            """SELECT substr(fetched_at,12,2) hh, status, COUNT(*)
+               FROM scrape_log WHERE substr(fetched_at,1,10)=?
+               GROUP BY 1,2 ORDER BY 1,2""", (latest[0],)).fetchall()
+        bad = conn.execute(
+            """SELECT substr(fetched_at,12,19), shop_id, status,
+                      substr(detail,1,40)
+               FROM scrape_log WHERE status!='ok'
+               ORDER BY log_id DESC LIMIT 10""").fetchall()
+    except sqlite3.OperationalError:
+        return lines
+    lines.append(f"  scrape_log {latest[0]} (ok/empty/fail per hour):")
+    hourmap = {}
+    for hh, st, n in hourly:
+        hourmap.setdefault(hh, {})[st] = n
+    for hh in sorted(hourmap):
+        s = hourmap[hh]
+        lines.append(f"    {hh}時 ok={s.get('ok', 0)} empty={s.get('empty', 0)}"
+                     f" fail={s.get('fail', 0)}")
+    if bad:
+        lines.append("  直近の empty/fail:")
+        lines += [f"    {fa} shop={sid} {st} {dt or ''}"
+                  for fa, sid, st, dt in bad]
+    return lines
 
 
 def print_report(conn, date=None, min_days=2, threshold=0.6,

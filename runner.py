@@ -463,10 +463,16 @@ def run_log_mark(job: str, status: str, detail: str | None = None) -> None:
 
 # ------------------------------------------------------------------ jobs ----
 
+CURRENT_RUN_ID: int | None = None  # run_log id of the active job
+
+
 def run_scraper(args: list[str], timeout: int = 1800) -> None:
+    env = dict(os.environ)
+    if CURRENT_RUN_ID is not None:
+        env["ESTAMA_RUN_ID"] = str(CURRENT_RUN_ID)  # scraper -> scrape_log join
     proc = subprocess.run(
         [str(VENV_PY), *args],
-        cwd=APP, capture_output=True, text=True, timeout=timeout,
+        cwd=APP, capture_output=True, text=True, timeout=timeout, env=env,
     )
     tail = (proc.stdout + proc.stderr).strip().splitlines()[-3:]
     for line in tail:
@@ -607,6 +613,8 @@ def main() -> int:
     job = sys.argv[1]
     log(f"START {job}")
     run_id = run_log_open(job)
+    global CURRENT_RUN_ID
+    CURRENT_RUN_ID = run_id
     try:
         detail = {"checkpoint": job_checkpoint, "ranking": job_ranking,
                   "prune": job_prune}[job]()

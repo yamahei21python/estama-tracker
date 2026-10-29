@@ -108,3 +108,22 @@ CREATE TABLE IF NOT EXISTS run_log (
 
 CREATE INDEX IF NOT EXISTS idx_run_log_started
     ON run_log (started_at);
+
+-- Per-shop scrape audit inside a checkpoint run. One row per shop per
+-- scrape attempt: 'ok' (rows>0), 'empty' (fetch worked, 0 cast rows) and
+-- 'fail' (exception). Without it a failed shop is indistinguishable from
+-- a shop with no casts on duty.
+CREATE TABLE IF NOT EXISTS scrape_log (
+    log_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id     INTEGER,                -- run_log.run_id when launched by runner
+    shop_id    INTEGER NOT NULL,
+    fetched_at TEXT NOT NULL,          -- 'YYYY-MM-DD HH:MM:SS JST'
+    status     TEXT NOT NULL,          -- ok | empty | fail
+    rows       INTEGER NOT NULL DEFAULT 0,
+    detail     TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_scrape_log_shop
+    ON scrape_log (shop_id, fetched_at);
+CREATE INDEX IF NOT EXISTS idx_scrape_log_status
+    ON scrape_log (status, fetched_at);

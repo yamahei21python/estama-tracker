@@ -96,5 +96,6 @@ python3 tests/test_prune.py           # 出禁ルール
 - `shops.json` の `area` は情報項目で、取り込みロジックは参照しない（初期店は店舗の地域、ランキング同期で追加された店はランキングのエリア名が入る）。`report` のエリア別完売率集計で使用
 - **`daily_cast_status`** … R3 で確定した「キャスト×日×最終状態」を1行に集約した日次ロールアップ（アラート履歴・トレンド・遷移分析の基盤）。`estama_tracker.py rollup` が `DELETE+INSERT` で再計算するため部分日も何度でも再取得可。runner は checkpoint/ranking 取り込み後に自動実行
 - **`run_log`** … runner ジョブの実行履歴（`ok|fail|skip`＋detail）。巡回失敗・ロック競合の監査用。`report`【10】で閲覧
+- **`scrape_log`** … 店舗ごとの巡回結果（`ok|empty|fail`＋行数＋エラー内容）。「取得失敗」と「出勤0人」を区別するための監査テーブル。runner 経由なら `run_id` で `run_log` と結合できる（runner が `ESTAMA_RUN_ID` を環境変数で渡す）。`report`【10】で時間帯別 ok/empty/fail と直近の異常を閲覧
 - **「時間のみ」ステータス**: サイト側がステータス文言を設定していないキャスト（予約枠0・空き枠0）にスクレイパーが付けるラベル。ダミー/架空人物の可能性が高く、`closed`（受付終了相当）に分類される。ステータス文言がない限り `sold_out` にはならない（ダミー対策）
 - **「TELのみ」= `dummy`**: タイムテーブルのセルが全て `TEL`（電話のみ＝オンライン予約枠なし）のキャスト。`status_norm` は **`dummy`**（`available`/`closed` にはしない）。`slot_pattern` は `全Nコマ TEL (電話のみ)`。サイト文言がある場合も `文言 / TELのみ` にして `dummy`（完売文言があれば `sold_out` 優先）。列は `td[data-idx]=cast_id` で縦に紐付ける
