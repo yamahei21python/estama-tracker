@@ -44,7 +44,7 @@ runner.py = 巡回・取込・検証・日次アーカイブ・data ブランチ
 | `app/deep_shops.json` | deep tier（爆サイでスレッドが確認できた店だけの固定リスト。口コミ順位で埋めない） |
 | `tests/` | 標準ライブラリのみのテスト（15ファイル、ネットワーク不要） |
 
-DB（`*.db`）と `storage.json`、`banned_shops.json` はランタイム成果物のため git 管理外。`bakusai.db` は VM ローカルの別 DB で、data ブランチにも上げない。
+DB（`*.db`）と `storage.json`、`banned_shops.json`、`dashboard.html`、`logs/`、`staging/`、`r2_local/` はランタイム成果物のため git 管理外。`bakusai.db` は VM ローカルの別 DB で、data ブランチにも上げない。`.perch/mcp.json`（ローカルCLI設定・認証情報を含み得る）も管理外。
 
 ## クイックスタート（ローカル）
 
@@ -78,7 +78,7 @@ python3 -m venv venv
 | アラート（根拠付き） | `app/estama_tracker.py alert --date D --min-days 3 --threshold 0.7` |
 | 4時間以内の完売確率 | `app/estama_tracker.py sellout-forecast --deep-shops app/deep_shops.json` |
 | 日次レポート | `app/estama_tracker.py report --date D`（`--no-evidence` で根拠省略） |
-| 監視（警告時 exit 1） | `app/estama_tracker.py monitor --db app/estama.db` |
+| 監視（警告時 exit 1） | `app/estama_tracker.py monitor --db app/estama.db`（既定日=現在の営業日。`--date` は `YYYY-MM-DD` 厳格） |
 | 爆サイ | `app/bakusai.py discover` / `crawl --deep app/deep_shops.json` / `status` |
 | 通知・ダッシュボード | `app/estama_tracker.py notify` / `dashboard --out dashboard.html` |
 | 個別キャスト | `app/estama_tracker.py cast --shop-id X --cast-id Y` |
@@ -103,6 +103,8 @@ python3 -m venv venv
 
 publish は1実行1コミット。書込み直後に blob SHA を照合し、不一致なら1回だけ再送、それでも不一致なら前の blob に戻す（前版が無ければキーを削除）。壊れた DB が最新版を潰さない。publish が失敗した実行は `run_log` を `fail` にして runner が exit 1 する（cron 側で気づける）。
 
+日次アーカイブは「閉じた営業日」（期待営業日の前日）をキーに `archive/estama-<営業日>.db` を1回だけ保存する。サイトが最終チェックポイントより先に日付を切り替えても取り逃さず、アーカイブ失敗時は checkpoint/ranking を止めずに次回再試行する（検証不成立のキーは削除）。
+
 ## テスト
 
 すべて標準ライブラリのみ・ネットワーク不要。
@@ -113,13 +115,13 @@ for t in tests/test_*.py; do ./venv/bin/python "$t" || break; done
 
 | ファイル | 対象 |
 |---|---|
-| `test_slot_events.py` | 枠パース・イベント重複排除・シフト内外判定 |
+| `test_slot_events.py` | 枠パース・イベント重複排除・シフト内外判定・遅延リプレイ拒否 |
 | `test_hazard.py` | 時間帯別 hazard・ベースライン・確率の出し方 |
 | `test_evidence.py` | 根拠表示（口コミ/爆サイ/枠消失/出典・失敗時も alert 不変） |
-| `test_bakusai.py` | 発見・紐付け信頼度・検索フォールバック・crawl 再開/重複排除 |
+| `test_bakusai.py` | 発見・紐付け信頼度・検索フォールバック・crawl 再開/重複排除・404継続・リダイレクト課金 |
 | `test_monitor.py` | 監視の警告条件 |
 | `test_gh_storage.py` | data ブランチ保存の blob 検証・復元 |
-| `test_runner.py` | ロック・検証・アーカイブ・1コミット publish |
+| `test_runner.py` | ロック・検証・アーカイブ（閉じた営業日）・1コミット publish・publish 失敗の exit 1 |
 | ほか（final_states / rollup / prune / speed_rank / timestamps / normalize / tracker_alert / gemini_retry） | 既存の分析・取込ロジック |
 
 ## データの注意（必読・抜粋）

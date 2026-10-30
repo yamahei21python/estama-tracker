@@ -12,7 +12,7 @@ VM での運用手順は [RUNBOOK.md](RUNBOOK.md) にまとめてある。
 | `app/ranking_scraper.py` | 週間人気セラピストランキング（14エリア×30人）の取得、`cast_rankings` 保存、ウォッチリスト同期（各エリア上位10位の店を `shops.json` へ追加） |
 | `app/estama_tracker.py` | 分析側。完売一覧・ステータス件数・「普段完売なのに今日空いている」アラート |
 | `app/common.py` | 共通部品（パス、UA、セッション、DB接続、JSON入出力、ステータス文言の正規化）。ここに一元化されている |
-| `app/schema.sql` | DBスキーマ（shops / snapshots / cast_rankings / daily_cast_status / run_log） |
+| `app/schema.sql` | DBスキーマ（shops / snapshots / cast_rankings / daily_cast_status / run_log / scrape_log / forecast_eval / slot_events / cast_watch） |
 | `app/shops.json` | ウォッチリスト（巡回対象の店） |
 | `app/banned_shops.json` | 出禁リスト（実行時に生成。git対象外） |
 | `app/bakusai.py` | 爆サイ.com のスレッド発見・本文取得。専用 DB `bakusai.db`（git対象外、VMローカル） |
@@ -29,7 +29,7 @@ VM での運用手順は [RUNBOOK.md](RUNBOOK.md) にまとめてある。
   74店スクレイプ → DB取り込み → 検証 → `data` ブランチの `estama.db` を1コミットで上書き
 - **ランキング（毎日 06:15）**: `runner.py ranking`
   ランキング取得＋ウォッチリスト同期 → 出禁判定 → DB・shops.json を `data` ブランチへ
-- **日次アーカイブ**: 営業日（朝6時切替）が終わった時点で、**閉じた営業日**（期待営業日の前日）のDBを `archive/estama-<営業日>.db` に1回だけ保存。サイトが最終チェックポイントより先に日付を切り替えても取り逃さない
+- **日次アーカイブ**: 営業日（朝6時切替）が終わった時点で、**閉じた営業日**（期待営業日の前日）のDBを `archive/estama-<営業日>.db` に1回だけ保存。サイトが最終チェックポイントより先に日付を切り替えても取り逃さない。アーカイブ失敗時は検証不成立のキーを消して checkpoint/ranking は続行し、次回に再試行する
 
 ### runner の安全装置
 
@@ -103,6 +103,7 @@ export ESTAMA_NOTIFY_WEBHOOK=https://discord.com/api/webhooks/...   # Slack/Disc
 ./venv/bin/python app/estama_tracker.py sellout-forecast --deep-shops app/deep_shops.json
 
 # 監視レポート（店別fail率・0行店・checkpoint欠損・枠イベント取得率を冒頭に警告、exit 1）
+# 既定日は現在の営業日（06:00切替）。--date は YYYY-MM-DD 厳格
 ./venv/bin/python app/estama_tracker.py monitor --db app/estama.db
 
 # 爆サイ（別DB bakusai.db）。deep tier はスレッドが確認できた店だけの固定JSON
@@ -119,19 +120,27 @@ export ESTAMA_NOTIFY_WEBHOOK=https://discord.com/api/webhooks/...   # Slack/Disc
 ## テスト
 
 ```bash
-python3 tests/test_tracker_alert.py   # アラートの日次集計（標準ライブラリのみ）
+# 全テスト（標準ライブラリのみ・ネットワーク不要）
+for t in tests/test_*.py; do python3 "$t" || break; done
+
+# 個別に回す場合
+python3 tests/test_tracker_alert.py   # アラートの日次集計
 python3 tests/test_final_states.py    # R3 最終状態（分析時のみ反転、DB非改変）
 python3 tests/test_speed_rank.py      # 完売スピードの日跨ぎ順序（fetched_at 基準）
-python3 tests/test_runner.py          # ロック・検証・アーカイブ・アップロード・run_log
+python3 tests/test_timestamps.py      # JST タイムスタンプ（UTC VM でのズレ回帰）
+python3 tests/test_runner.py          # ロック・検証・アーカイブ・publish 失敗の exit 1
 python3 tests/test_rollup.py          # daily_cast_status ロールアップとレポート節
 python3 tests/test_prune.py           # 出禁ルール
-python3 tests/test_slot_events.py     # 枠パース・イベント重複排除
+python3 tests/test_slot_events.py     # 枠パース・イベント重複排除・遅延リプレイ拒否
 python3 tests/test_hazard.py          # 時間帯別 hazard・ベースライン
 python3 tests/test_evidence.py        # 根拠表示（口コミ/爆サイ/枠消失/出典）
-python3 tests/test_bakusai.py         # 爆サイ（発見・紐付け信頼度・検索フォールバック・crawl）
+python3 tests/test_bakusai.py         # 爆サイ（発見・紐付け・crawl・予算/リダイレクト）
 python3 tests/test_monitor.py         # 監視の警告条件
 python3 tests/test_gh_storage.py      # data ブランチ保存の blob 検証・復元
-./venv/bin/python tests/test_normalize.py  # ステータス正規化の真理表
+python3 tests/test_normalize.py       # ステータス正規化の真理表
+python3 tests/test_gemini_retry.py    # gemini_retry_guard（未使用モジュール）の単体テスト
+
+# デモ
 ./venv/bin/python app/estama_tracker.py demo
 ```
 
