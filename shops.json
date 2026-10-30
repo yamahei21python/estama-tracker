@@ -632,6 +632,42 @@
       "name": "YOLU SPA（ヨルスパ）堺東店",
       "area": "堺・堺東・我孫子",
       "source_url": "https://estama.jp/shop/46863/schedule/"
+    },
+    {
+      "shop_id": 50266,
+      "name": "あろまわんぷらす　梅田店",
+      "area": "梅田・大阪駅",
+      "source_url": "https://estama.jp/shop/50266/schedule/"
+    },
+    {
+      "shop_id": 41995,
+      "name": "大阪日本橋メンズエステ Aroma Doll-アロマドール-",
+      "area": "日本橋",
+      "source_url": "https://estama.jp/shop/41995/schedule/"
+    },
+    {
+      "shop_id": 50904,
+      "name": "新大阪メンズエステREX SPA",
+      "area": "十三・新大阪・西中島",
+      "source_url": "https://estama.jp/shop/50904/schedule/"
+    },
+    {
+      "shop_id": 32931,
+      "name": "新大阪メンズエステ Checkmate（チェックメイト）",
+      "area": "十三・新大阪・西中島",
+      "source_url": "https://estama.jp/shop/32931/schedule/"
+    },
+    {
+      "shop_id": 29526,
+      "name": "Mrs.美witch～美魔女の癒し魔法～堺東/岸和田ルーム",
+      "area": "堺・堺東・我孫子",
+      "source_url": "https://estama.jp/shop/29526/schedule/"
+    },
+    {
+      "shop_id": 49940,
+      "name": "ANESSA大阪≪南大阪≫",
+      "area": "その他大阪府",
+      "source_url": "https://estama.jp/shop/49940/schedule/"
     }
   ],
   "status": "CONFIGURED",
