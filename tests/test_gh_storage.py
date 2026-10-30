@@ -1,4 +1,4 @@
-"""Tests for runner.py's GitHub storage helpers (offline parts only):
+"""Tests for storage.py's GitHub backend helpers (offline parts only):
 key->path mapping, git blob SHA, and gzip payload determinism.
 Run: python3 tests/test_gh_storage.py
 """
@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 os.environ["ESTAMA_VM_BASE"] = tempfile.mkdtemp(prefix="estama-gh-test-")
 
-spec = importlib.util.spec_from_file_location("runner", ROOT / "runner.py")
+spec = importlib.util.spec_from_file_location("storage", ROOT / "storage.py")
 r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
 

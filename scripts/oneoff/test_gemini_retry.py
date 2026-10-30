@@ -1,18 +1,17 @@
-"""Tests for app/gemini_retry_guard.py。
+"""Tests for scripts/oneoff/gemini_retry_guard.py (archived, unused).
 
-Run: python3 tests/test_gemini_retry.py
+Run: python3 scripts/oneoff/test_gemini_retry.py
 """
 import importlib.util
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-ROOT = Path(__file__).resolve().parent.parent
-APP = ROOT / "app"
+HERE = Path(__file__).resolve().parent
 
 # inject gemini_retry_guard as a module (no pip install needed)
 spec = importlib.util.spec_from_file_location(
-    "gemini_retry_guard", APP / "gemini_retry_guard.py")
+    "gemini_retry_guard", HERE / "gemini_retry_guard.py")
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 retry_guard = mod.retry_guard

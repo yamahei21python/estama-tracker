@@ -4,21 +4,24 @@ archive, staged upload promotion, and the single-instance lock.
 Self-contained: builds a tiny DB from schema.sql in a temp dir.
 Run: python3 tests/test_runner.py
 """
+import atexit
 import importlib.util
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRATCH = Path("/tmp/estama-runner-test")
+SCRATCH = Path(tempfile.mkdtemp(prefix="estama-runner-test-"))
+atexit.register(shutil.rmtree, SCRATCH, True)
 JST = ZoneInfo("Asia/Tokyo")
 
-subprocess.run(["rm", "-rf", str(SCRATCH)])
 (SCRATCH / "app").mkdir(parents=True)
 os.environ["ESTAMA_VM_BASE"] = str(SCRATCH)
 
@@ -114,12 +117,12 @@ con.close()
 # restores the previous live blob so the branch never keeps a bad DB.
 puts, restores = [], []
 orig = (r.backend_name, r.storage_put, r.storage_verify,
-        r._gh_live_blob, r._gh_restore)
+        r.gh_live_blob, r.gh_restore)
 r.backend_name = lambda: "github"
 r.storage_put = lambda key, f: puts.append(key)
 r.storage_verify = lambda key, f: False
-r._gh_live_blob = lambda key: "prevsha"
-r._gh_restore = lambda key, sha: restores.append((key, sha))
+r.gh_live_blob = lambda key: "prevsha"
+r.gh_restore = lambda key, sha: restores.append((key, sha))
 try:
     r.upload_db()
     check("upload raises when verification keeps failing", False)
@@ -127,7 +130,7 @@ except IOError:
     check("upload raises when verification keeps failing", True)
 finally:
     (r.backend_name, r.storage_put, r.storage_verify,
-     r._gh_live_blob, r._gh_restore) = orig
+     r.gh_live_blob, r.gh_restore) = orig
 check("failed verification retries the upload once",
       puts == ["estama.db", "estama.db"])
 check("failed verification restores the previous live blob",
@@ -137,12 +140,12 @@ check("failed verification restores the previous live blob",
 # the next run does not mistake an unverifiable object for a good one
 deletes = []
 orig = (r.backend_name, r.storage_put, r.storage_verify,
-        r._gh_live_blob, r._gh_restore, r.storage_delete)
+        r.gh_live_blob, r.gh_restore, r.storage_delete)
 r.backend_name = lambda: "github"
 r.storage_put = lambda key, f: None
 r.storage_verify = lambda key, f: False
-r._gh_live_blob = lambda key: None
-r._gh_restore = lambda key, sha: None
+r.gh_live_blob = lambda key: None
+r.gh_restore = lambda key, sha: None
 r.storage_delete = lambda key: deletes.append(key)
 try:
     r.upload_db()
@@ -151,20 +154,24 @@ except IOError:
     check("upload raises (no previous blob)", True)
 finally:
     (r.backend_name, r.storage_put, r.storage_verify,
-     r._gh_live_blob, r._gh_restore, r.storage_delete) = orig
+     r.gh_live_blob, r.gh_restore, r.storage_delete) = orig
 check("failed verification with no previous blob deletes the live key",
       deletes == ["estama.db"])
 
-holder = subprocess.Popen([sys.executable, "-c",
-                           "import fcntl,time; f=open('/tmp/estama-runner-test/runner.lock','w');"
-                           " fcntl.flock(f, fcntl.LOCK_EX); time.sleep(8)"])
-import time
-time.sleep(1)
+holder = subprocess.Popen(
+    [sys.executable, "-c",
+     f"import fcntl,time; f=open({str(SCRATCH / 'runner.lock')!r},'w');"
+     " fcntl.flock(f, fcntl.LOCK_EX); print('locked', flush=True); time.sleep(8)"],
+    stdout=subprocess.PIPE, text=True)
+# wait for the holder to actually own the lock instead of sleeping a
+# fixed second: same guarantee, no idle time in the suite
+assert holder.stdout.readline().strip() == "locked", "lock holder did not start"
 env = dict(os.environ, ESTAMA_VM_BASE=str(SCRATCH))
 p = subprocess.run([sys.executable, str(ROOT / "runner.py"), "checkpoint"],
                    capture_output=True, text=True, env=env, timeout=30)
 check("overlap run exits 0 with SKIP", p.returncode == 0 and "SKIP" in p.stdout)
 holder.terminate()
+holder.wait(timeout=10)
 
 # run_log: the SKIP above must have been recorded in the DB
 con = sqlite3.connect(db)

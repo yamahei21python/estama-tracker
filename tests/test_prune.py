@@ -5,17 +5,19 @@ out even if a ranking sync re-adds it. History rows are kept.
 
 Run: python3 tests/test_prune.py
 """
+import atexit
 import importlib.util
 import json
 import os
+import shutil
 import sqlite3
-import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRATCH = Path("/tmp/estama-prune-test")
-subprocess.run(["rm", "-rf", str(SCRATCH)])
+SCRATCH = Path(tempfile.mkdtemp(prefix="estama-prune-test-"))
+atexit.register(shutil.rmtree, SCRATCH, True)
 (SCRATCH / "app").mkdir(parents=True)
 os.environ["ESTAMA_VM_BASE"] = str(SCRATCH)
 

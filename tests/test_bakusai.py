@@ -4,17 +4,18 @@ anchor backtracking. Network is replaced by a fake HTTP callable.
 
 Run: python3.11 tests/test_bakusai.py
 """
+import atexit
 import json
 import shutil
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRATCH = Path("/tmp/estama-bakusai-test")
-shutil.rmtree(SCRATCH, ignore_errors=True)
-SCRATCH.mkdir(parents=True)
+SCRATCH = Path(tempfile.mkdtemp(prefix="estama-bakusai-test-"))
+atexit.register(shutil.rmtree, SCRATCH, True)
 sys.path.insert(0, str(ROOT / "app"))
 import bakusai as b  # noqa: E402
 import evidence  # noqa: E402

@@ -10,7 +10,10 @@ VM での運用手順は [RUNBOOK.md](RUNBOOK.md) にまとめてある。
 |---|---|
 | `app/estama_scraper.py` | 出勤表の巡回。74店の当日分を取得し DB へ取り込む。完売スピード分析（`--speed-rank`）もここ |
 | `app/ranking_scraper.py` | 週間人気セラピストランキング（14エリア×30人）の取得、`cast_rankings` 保存、ウォッチリスト同期（各エリア上位10位の店を `shops.json` へ追加） |
-| `app/estama_tracker.py` | 分析側。完売一覧・ステータス件数・「普段完売なのに今日空いている」アラート |
+| `app/estama_tracker.py` | 分析 CLI（report / alert / sellout-forecast / monitor / notify / dashboard / cast）。引数解析とディスパッチ、取込・検証のみ。計算と整形は `queries.py` / `analysis.py` / `report_sections.py` に分離 |
+| `app/queries.py` | R3 最終状態の SQL・日付/キャストキー解決・店名/エリア参照（分析側の共通クエリ） |
+| `app/analysis.py` | アラート判定（普段完売なのに空き）・根拠行の組み立て・`daily_cast_status` ロールアップ |
+| `app/report_sections.py` | レポート各節・完売予測（hazard）・監視・notify・HTML ダッシュボード |
 | `app/common.py` | 共通部品（パス、UA、セッション、DB接続、JSON入出力、ステータス文言の正規化）。ここに一元化されている |
 | `app/schema.sql` | DBスキーマ（shops / snapshots / cast_rankings / daily_cast_status / run_log / scrape_log / forecast_eval / slot_events / cast_watch） |
 | `app/shops.json` | ウォッチリスト（巡回対象の店） |
@@ -19,7 +22,8 @@ VM での運用手順は [RUNBOOK.md](RUNBOOK.md) にまとめてある。
 | `app/deep_shops.json` | deep tier（爆サイでスレッドが確認できた店だけの固定リスト。口コミ順位で埋めない） |
 | `app/evidence.py` | alert の根拠表示（口コミ・爆サイ・枠消失・出典URL。表示専用で判定には使わない） |
 | `app/RUNBOOK.md` | VM 運用手順書（1コマンド運用・デプロイ後の確認手順） |
-| `runner.py` | 運用ランナー。下記の安全装置と `data` ブランチへのアップロードを担当 |
+| `runner.py` | 運用ランナー。下記の安全装置・DB検証・アーカイブ・publish を担当 |
+| `storage.py` | 保存バックエンドの切替と検証（GitHub data ブランチ／R2／ローカルミラー） |
 
 ## 運用フロー
 
@@ -120,7 +124,7 @@ export ESTAMA_NOTIFY_WEBHOOK=https://discord.com/api/webhooks/...   # Slack/Disc
 ## テスト
 
 ```bash
-# 全テスト（標準ライブラリのみ・ネットワーク不要）
+# 全テスト（外部通信なし。requests / beautifulsoup4 が必要）
 for t in tests/test_*.py; do python3 "$t" || break; done
 
 # 個別に回す場合
@@ -136,9 +140,20 @@ python3 tests/test_hazard.py          # 時間帯別 hazard・ベースライン
 python3 tests/test_evidence.py        # 根拠表示（口コミ/爆サイ/枠消失/出典）
 python3 tests/test_bakusai.py         # 爆サイ（発見・紐付け・crawl・予算/リダイレクト）
 python3 tests/test_monitor.py         # 監視の警告条件
+python3 tests/test_schema_migration.py # user_version 移行・索引・クエリ計画
+python3 tests/test_chrono.py          # 営業日06:00境界・chrono_keyとSQLの一致
 python3 tests/test_gh_storage.py      # data ブランチ保存の blob 検証・復元
+python3 tests/test_archive_retention.py  # アーカイブ保持（30日＋週次）
 python3 tests/test_normalize.py       # ステータス正規化の真理表
-python3 tests/test_gemini_retry.py    # gemini_retry_guard（未使用モジュール）の単体テスト
+python3 tests/test_report_sections.py # 未実行だった6節（timing/area/shops/ranking/forecast/print_report）
+python3 tests/test_cli_wiring.py      # CLI 配線（rollup/report/dashboard/notify/counts/alert）
+python3 tests/test_report_golden.py   # report/dashboard/notify のゴールデン（時計固定）
+python3 tests/test_parse_golden.py    # 出勤表パースのゴールデン（今日/未来/境界HTML）
+python3 tests/test_ranking_parse.py   # ランキングHTML fixture（PR/画像順位/リンク欠落の除外・DB取込）
+
+# ゴールデンの意図的な更新（差分を確認してから）
+# ESTAMA_UPDATE_GOLDEN=1 python3 tests/test_report_golden.py
+# ESTAMA_UPDATE_GOLDEN=1 python3 tests/test_parse_golden.py
 
 # デモ
 ./venv/bin/python app/estama_tracker.py demo

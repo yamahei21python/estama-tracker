@@ -7,6 +7,7 @@ Run: python3.11 tests/test_hazard.py
 """
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
@@ -121,11 +122,11 @@ check("cold start: baseline ranking still shown",
 check("cold start: p withheld", fc3["baseline"][0]["p"] is None)
 
 # ---------- deep shop file ----------
-tmp = Path("/tmp/estama-deep-test.json")
+tmp = Path(tempfile.mkdtemp(prefix="estama-deep-")) / "deep.json"
 tmp.write_text('{"shops": [{"shop_id": 3, "name": "x"}, 7]}')
 check("deep shop ids from file", load_deep_shop_ids(tmp) == {3, 7})
 check("missing deep file -> empty set",
-      load_deep_shop_ids("/tmp/no-such-deep.json") == set())
+      load_deep_shop_ids(str(tmp.parent / "no-such-deep.json")) == set())
 tmp.unlink()
 
 print()

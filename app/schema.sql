@@ -36,12 +36,19 @@ CREATE TABLE IF NOT EXISTS snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_cast_date
     ON snapshots (shop_id, cast_name, target_date);
+CREATE INDEX IF NOT EXISTS idx_snapshots_castid_date
+    ON snapshots (shop_id, cast_id, target_date);
 CREATE INDEX IF NOT EXISTS idx_snapshots_status_date
     ON snapshots (status_norm, target_date);
-CREATE INDEX IF NOT EXISTS idx_snapshots_time
-    ON snapshots (target_date, fetched_time);
-CREATE INDEX IF NOT EXISTS idx_snapshots_work_hours
-    ON snapshots (work_hours);
+-- Every chronological query orders by fetched_at; this is the index
+-- that keeps those ORDER BYs from building a temp b-tree.
+CREATE INDEX IF NOT EXISTS idx_snapshots_date_at
+    ON snapshots (target_date, fetched_at);
+-- no fetched_time / work_hours indexes: all time-series reads key on
+-- fetched_at, and nothing filters on work_hours (write cost only). The
+-- UNIQUE key keeps fetched_time because that is the checkpoint label
+-- the scraper dedupes on; cast_id cannot replace it (NULLs are distinct
+-- in a SQLite UNIQUE, and legacy rows have no cast_id).
 
 -- Weekly / Monthly Popular Cast Rankings
 CREATE TABLE IF NOT EXISTS cast_rankings (

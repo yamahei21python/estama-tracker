@@ -1,18 +1,19 @@
 """Tests for evidence.py: review aggregation, slot-loss timing, bakusai
 attribution, and graceful degradation when a source DB is missing.
 
-Builds three tiny throwaway DBs (estama / review / bakusai) in /tmp.
+Builds three tiny throwaway DBs (estama / review / bakusai) in a temp dir.
 Run: python3.11 tests/test_evidence.py
 """
+import atexit
 import shutil
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRATCH = Path("/tmp/estama-evidence-test")
-shutil.rmtree(SCRATCH, ignore_errors=True)
-SCRATCH.mkdir(parents=True)
+SCRATCH = Path(tempfile.mkdtemp(prefix="estama-evidence-test-"))
+atexit.register(shutil.rmtree, SCRATCH, True)
 
 sys.path.insert(0, str(ROOT / "app"))
 import evidence as ev  # noqa: E402

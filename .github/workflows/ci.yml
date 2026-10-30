@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip requests beautifulsoup4
+      - name: Compile
+        run: python -m compileall -q app runner.py storage.py tests scripts
+      - name: Tests
+        run: |
+          set -e
+          for t in tests/test_*.py; do
+            echo "== $t"
+            python "$t"
+          done

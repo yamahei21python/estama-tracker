@@ -4,17 +4,18 @@ fail rate, zero-row shops, slot-event capture rate, stale runs, and the
 
 Run: python3.11 tests/test_monitor.py
 """
+import atexit
 import shutil
 import sqlite3
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRATCH = Path("/tmp/estama-monitor-test")
-shutil.rmtree(SCRATCH, ignore_errors=True)
-SCRATCH.mkdir(parents=True)
+SCRATCH = Path(tempfile.mkdtemp(prefix="estama-monitor-test-"))
+atexit.register(shutil.rmtree, SCRATCH, True)
 sys.path.insert(0, str(ROOT / "app"))
 import estama_tracker as t  # noqa: E402
 

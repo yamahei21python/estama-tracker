@@ -41,13 +41,17 @@ from datetime import datetime
 from email.utils import mktime_tz, parsedate_tz
 from pathlib import Path
 from urllib.parse import urljoin
-from zoneinfo import ZoneInfo
+
+from common import now_jst
 
 BASE = Path(__file__).resolve().parent
-JST = ZoneInfo("Asia/Tokyo")
-DEFAULT_DB = Path(os.environ.get("ESTAMA_BAKUSAI_DB") or BASE / "bakusai.db")
 DEFAULT_SHOPS = BASE / "shops.json"
 DEFAULT_DEEP = BASE / "deep_shops.json"
+
+
+def default_db() -> Path:
+    """bakusai DB path; env is read lazily so tests can redirect it."""
+    return Path(os.environ.get("ESTAMA_BAKUSAI_DB") or BASE / "bakusai.db")
 
 HOST = "https://bakusai.com"
 ACODE = 7
@@ -158,12 +162,8 @@ class SearchFailed(RuntimeError):
     pass
 
 
-def now_jst():
-    return datetime.now(JST)
-
-
 def connect(path=None):
-    con = sqlite3.connect(str(path or DEFAULT_DB))
+    con = sqlite3.connect(str(path or default_db()))
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
     return con
@@ -597,15 +597,16 @@ def link_shop(conn, tid, shop, confidence, source, matched, now):
          now))
 
 
-def discover(conn, client, shops, boards=None, search=True, now=None,
-             log=print):
-    """Run latest-30 + area search discovery; returns a summary dict."""
-    now = now or now_jst().strftime("%Y-%m-%d %H:%M:%S")
-    summary = {"latest_threads": 0, "search_results": 0, "links": 0,
-               "search_ok": 0, "search_failed": 0, "search_skipped": 0,
-               "search_retry": 0, "budget_stopped": False}
-    boards = list(boards or BOARDS)
+def _save_search(conn, shop_id, word, status, n_results, now):
+    conn.execute(
+        "INSERT INTO bakusai_shop_search(shop_id, word, status,"
+        " n_results, checked_at) VALUES(?,?,?,?,?)"
+        " ON CONFLICT(shop_id) DO UPDATE SET status = excluded.status,"
+        " n_results = excluded.n_results, checked_at = excluded.checked_at",
+        (shop_id, word, status, n_results, now))
 
+
+def _discover_latest(conn, client, shops, boards, now, summary, log):
     threads = []
     for bid in boards:
         try:
@@ -631,80 +632,95 @@ def discover(conn, client, shops, boards=None, search=True, now=None,
                 summary["links"] += 1
     conn.commit()
 
-    if not search:
-        conn.executemany(
-            "INSERT INTO bakusai_shop_search(shop_id, word, status,"
-            " n_results, checked_at) VALUES(?,?,?,?,?)"
-            " ON CONFLICT(shop_id) DO UPDATE SET status = excluded.status,"
-            " n_results = excluded.n_results, checked_at = excluded.checked_at",
-            [(s["shop_id"], s["name"], "skipped", 0, now) for s in shops])
-        conn.commit()
-        summary["search_skipped"] = len(shops)
-        summary["mode"] = "latest_only"
-        return summary
 
+def _search_with_retry(client, shop, summary, log):
+    """(rows, word) for one shop; the no-hit fallback word is tried once."""
+    word = search_word(shop["name"])
+    rows = client.search_threads(word)
+    if not rows:
+        retry = fallback_search_word(shop["name"])
+        if retry:
+            summary["search_retry"] += 1
+            try:
+                rows = client.search_threads(retry)
+            except SearchFailed as e:
+                log(f"  検索再試行失敗 {shop['name']}: {e}")
+                rows = []
+            else:
+                if rows:
+                    word = retry
+    return rows, word
+
+
+def _link_search_rows(conn, rows, shops, summary, now):
+    for t in rows:
+        if t.get("bid"):
+            upsert_thread(conn, t, now)
+        # A search hit can name several shops; link every strong
+        # title match so thread<->shop stays many-to-many.
+        for other in shops:
+            hit = title_match(t["title"], other["name"])
+            if hit and hit[0] >= MIN_ALERT_CONFIDENCE:
+                link_shop(conn, t["tid"], other, hit[0], "search",
+                          hit[1], now)
+                summary["links"] += 1
+
+
+def _discover_search(conn, client, shops, now, summary, log):
     failures = 0
     for shop in shops:
-        word = search_word(shop["name"])
         try:
-            rows = client.search_threads(word)
-            if not rows:
-                retry = fallback_search_word(shop["name"])
-                if retry:
-                    summary["search_retry"] += 1
-                    try:
-                        rows = client.search_threads(retry)
-                    except SearchFailed as e:
-                        log(f"  検索再試行失敗 {shop['name']}: {e}")
-                        rows = []
-                    else:
-                        if rows:
-                            word = retry
+            rows, word = _search_with_retry(client, shop, summary, log)
         except BudgetExhausted:
             summary["budget_stopped"] = True
             break
         except SearchFailed as e:
             failures += 1
             summary["search_failed"] += 1
-            conn.execute(
-                "INSERT INTO bakusai_shop_search(shop_id, word, status,"
-                " n_results, checked_at) VALUES(?,?,?,?,?)"
-                " ON CONFLICT(shop_id) DO UPDATE SET status = excluded.status,"
-                " n_results = excluded.n_results,"
-                " checked_at = excluded.checked_at",
-                (shop["shop_id"], word, "failed", 0, now))
+            _save_search(conn, shop["shop_id"], search_word(shop["name"]),
+                         "failed", 0, now)
             conn.commit()
             log(f"  検索失敗 {shop['name']}: {e}")
             continue
         summary["search_ok"] += 1
         summary["search_results"] += len(rows)
-        conn.execute(
-            "INSERT INTO bakusai_shop_search(shop_id, word, status,"
-            " n_results, checked_at) VALUES(?,?,?,?,?)"
-            " ON CONFLICT(shop_id) DO UPDATE SET status = excluded.status,"
-            " n_results = excluded.n_results, checked_at = excluded.checked_at",
-            (shop["shop_id"], word, "ok", len(rows), now))
-        for t in rows:
-            if t.get("bid"):
-                upsert_thread(conn, t, now)
-            # A search hit can name several shops; link every strong
-            # title match so thread<->shop stays many-to-many.
-            for other in shops:
-                hit = title_match(t["title"], other["name"])
-                if hit and hit[0] >= MIN_ALERT_CONFIDENCE:
-                    link_shop(conn, t["tid"], other, hit[0], "search",
-                              hit[1], now)
-                    summary["links"] += 1
+        _save_search(conn, shop["shop_id"], word, "ok", len(rows), now)
+        _link_search_rows(conn, rows, shops, summary, now)
         conn.commit()
+    return failures
 
+
+def _discover_mode(summary, failures, n_shops):
     if summary["budget_stopped"]:
-        summary["mode"] = "budget_stopped"
-    elif failures and failures == len(shops):
-        summary["mode"] = "fallback_latest_only"
-    elif failures:
-        summary["mode"] = "partial_search"
-    else:
-        summary["mode"] = "search"
+        return "budget_stopped"
+    if failures and failures == n_shops:
+        return "fallback_latest_only"
+    if failures:
+        return "partial_search"
+    return "search"
+
+
+def discover(conn, client, shops, boards=None, search=True, now=None,
+             log=print):
+    """Run latest-30 + area search discovery; returns a summary dict."""
+    now = now or now_jst().strftime("%Y-%m-%d %H:%M:%S")
+    summary = {"latest_threads": 0, "search_results": 0, "links": 0,
+               "search_ok": 0, "search_failed": 0, "search_skipped": 0,
+               "search_retry": 0, "budget_stopped": False}
+    boards = list(boards or BOARDS)
+
+    _discover_latest(conn, client, shops, boards, now, summary, log)
+
+    if not search:
+        for s in shops:
+            _save_search(conn, s["shop_id"], s["name"], "skipped", 0, now)
+        conn.commit()
+        summary["search_skipped"] = len(shops)
+        summary["mode"] = "latest_only"
+        return summary
+
+    failures = _discover_search(conn, client, shops, now, summary, log)
+    summary["mode"] = _discover_mode(summary, failures, len(shops))
     return summary
 
 
@@ -1077,7 +1093,7 @@ def cmd_backtrack(args):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="bakusai.com crawler")
-    ap.add_argument("--db", default=str(DEFAULT_DB))
+    ap.add_argument("--db", default=str(default_db()))
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("init", help="create bakusai.db schema")

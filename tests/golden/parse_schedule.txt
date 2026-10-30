@@ -1,0 +1,647 @@
+{
+  "case": "rich today",
+  "casts": [
+    {
+      "age": 24,
+      "cast_id": 12345,
+      "cast_name": "花子",
+      "shift": "12:00～20:00",
+      "shift_end": "20:00",
+      "shift_start": "12:00",
+      "slot_pattern": "○2コマ / ×1コマ (予約可)",
+      "slots": [
+        [
+          "10:00",
+          "○"
+        ],
+        [
+          "10:30",
+          "─"
+        ],
+        [
+          "11:00",
+          "○"
+        ],
+        [
+          "11:30",
+          "×"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 1,
+        "open_circles": 2,
+        "reserved_crosses": 1,
+        "tel_cells": 0
+      },
+      "status_norm": "low",
+      "status_raw": "予約受付中",
+      "work_hours": 8.0,
+      "work_minutes": 480
+    },
+    {
+      "age": null,
+      "cast_id": null,
+      "cast_name": "すず",
+      "shift": null,
+      "shift_end": "12:00",
+      "shift_start": "10:00",
+      "slot_pattern": "○2コマ / ×0コマ (予約可)",
+      "slots": [
+        [
+          "10:00",
+          "◯"
+        ],
+        [
+          "10:30",
+          "─"
+        ],
+        [
+          "11:00",
+          "─"
+        ],
+        [
+          "11:30",
+          "○"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 2,
+        "open_circles": 2,
+        "reserved_crosses": 0,
+        "tel_cells": 0
+      },
+      "status_norm": "low",
+      "status_raw": "予約受付中",
+      "work_hours": 2.0,
+      "work_minutes": 120
+    },
+    {
+      "age": null,
+      "cast_id": 333,
+      "cast_name": "あや",
+      "shift": "19:00～翌5:00",
+      "shift_end": "5:00",
+      "shift_start": "19:00",
+      "slot_pattern": "○1コマ / ×3コマ (予約可)",
+      "slots": [
+        [
+          "10:00",
+          "×"
+        ],
+        [
+          "10:30",
+          "×"
+        ],
+        [
+          "11:00",
+          "×"
+        ],
+        [
+          "11:30",
+          "○"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 0,
+        "open_circles": 1,
+        "reserved_crosses": 3,
+        "tel_cells": 0
+      },
+      "status_norm": "sold_out",
+      "status_raw": "本日完売",
+      "work_hours": 10.0,
+      "work_minutes": 600
+    },
+    {
+      "age": null,
+      "cast_id": 444,
+      "cast_name": "TEL子",
+      "shift": null,
+      "shift_end": null,
+      "shift_start": null,
+      "slot_pattern": "全1コマ ─ + TEL3 (電話のみ混在)",
+      "slots": [
+        [
+          "10:00",
+          "TEL"
+        ],
+        [
+          "10:30",
+          "TEL"
+        ],
+        [
+          "11:00",
+          "TEL"
+        ],
+        [
+          "11:30",
+          "─"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 1,
+        "open_circles": 0,
+        "reserved_crosses": 0,
+        "tel_cells": 3
+      },
+      "status_norm": "dummy",
+      "status_raw": "TELのみ",
+      "work_hours": null,
+      "work_minutes": null
+    }
+  ],
+  "days_offset": 0,
+  "has_next_page": false,
+  "target_date": "2026-10-30"
+}
+{
+  "case": "rich future",
+  "casts": [
+    {
+      "age": 24,
+      "cast_id": 12345,
+      "cast_name": "花子",
+      "shift": "12:00～20:00",
+      "shift_end": "20:00",
+      "shift_start": "12:00",
+      "slot_pattern": "○2コマ / ×1コマ (予約可)",
+      "slots": [
+        [
+          "10:00",
+          "○"
+        ],
+        [
+          "10:30",
+          "─"
+        ],
+        [
+          "11:00",
+          "○"
+        ],
+        [
+          "11:30",
+          "×"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 1,
+        "open_circles": 2,
+        "reserved_crosses": 1,
+        "tel_cells": 0
+      },
+      "status_norm": "low",
+      "status_raw": "予約受付中",
+      "work_hours": 8.0,
+      "work_minutes": 480
+    },
+    {
+      "age": null,
+      "cast_id": null,
+      "cast_name": "すず",
+      "shift": null,
+      "shift_end": "12:00",
+      "shift_start": "10:00",
+      "slot_pattern": "○2コマ / ×0コマ (予約可)",
+      "slots": [
+        [
+          "10:00",
+          "◯"
+        ],
+        [
+          "10:30",
+          "─"
+        ],
+        [
+          "11:00",
+          "─"
+        ],
+        [
+          "11:30",
+          "○"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 2,
+        "open_circles": 2,
+        "reserved_crosses": 0,
+        "tel_cells": 0
+      },
+      "status_norm": "low",
+      "status_raw": "予約受付中",
+      "work_hours": 2.0,
+      "work_minutes": 120
+    },
+    {
+      "age": null,
+      "cast_id": 333,
+      "cast_name": "あや",
+      "shift": "19:00～翌5:00",
+      "shift_end": "5:00",
+      "shift_start": "19:00",
+      "slot_pattern": "○1コマ / ×3コマ (予約可)",
+      "slots": [
+        [
+          "10:00",
+          "×"
+        ],
+        [
+          "10:30",
+          "×"
+        ],
+        [
+          "11:00",
+          "×"
+        ],
+        [
+          "11:30",
+          "○"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 0,
+        "open_circles": 1,
+        "reserved_crosses": 3,
+        "tel_cells": 0
+      },
+      "status_norm": "low",
+      "status_raw": "本日完売",
+      "work_hours": 10.0,
+      "work_minutes": 600
+    },
+    {
+      "age": null,
+      "cast_id": 444,
+      "cast_name": "TEL子",
+      "shift": null,
+      "shift_end": null,
+      "shift_start": null,
+      "slot_pattern": "全1コマ ─ + TEL3 (電話のみ混在)",
+      "slots": [
+        [
+          "10:00",
+          "TEL"
+        ],
+        [
+          "10:30",
+          "TEL"
+        ],
+        [
+          "11:00",
+          "TEL"
+        ],
+        [
+          "11:30",
+          "─"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 1,
+        "open_circles": 0,
+        "reserved_crosses": 0,
+        "tel_cells": 3
+      },
+      "status_norm": "dummy",
+      "status_raw": "TELのみ",
+      "work_hours": null,
+      "work_minutes": null
+    }
+  ],
+  "days_offset": 1,
+  "has_next_page": false,
+  "target_date": "2026-10-31"
+}
+{
+  "case": "misc today",
+  "casts": [
+    {
+      "age": 20,
+      "cast_id": 555,
+      "cast_name": "テル美",
+      "shift": null,
+      "shift_end": null,
+      "shift_start": null,
+      "slot_pattern": "全2コマ TEL (電話のみ)",
+      "slots": [
+        [
+          "18:00",
+          "TEL"
+        ],
+        [
+          "18:30",
+          "TEL"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 0,
+        "open_circles": 0,
+        "reserved_crosses": 0,
+        "tel_cells": 2
+      },
+      "status_norm": "dummy",
+      "status_raw": "ご予約受付中 / TELのみ",
+      "work_hours": null,
+      "work_minutes": null
+    },
+    {
+      "age": null,
+      "cast_id": 666,
+      "cast_name": "×子",
+      "shift": null,
+      "shift_end": "19:00",
+      "shift_start": "18:00",
+      "slot_pattern": "○0コマ / ×2コマ (本日完売)",
+      "slots": [
+        [
+          "18:00",
+          "×"
+        ],
+        [
+          "18:30",
+          "×"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 0,
+        "open_circles": 0,
+        "reserved_crosses": 2,
+        "tel_cells": 0
+      },
+      "status_norm": "dummy",
+      "status_raw": "全コマ×(事前予約不可/おとり候補)",
+      "work_hours": 1.0,
+      "work_minutes": 60
+    },
+    {
+      "age": null,
+      "cast_id": 777,
+      "cast_name": "閑子",
+      "shift": null,
+      "shift_end": null,
+      "shift_start": null,
+      "slot_pattern": "全2コマ ─ (受付終了/待機)",
+      "slots": [
+        [
+          "18:00",
+          "─"
+        ],
+        [
+          "18:30",
+          "─"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 2,
+        "open_circles": 0,
+        "reserved_crosses": 0,
+        "tel_cells": 0
+      },
+      "status_norm": "closed",
+      "status_raw": "時間のみ",
+      "work_hours": null,
+      "work_minutes": null
+    }
+  ],
+  "days_offset": 0,
+  "has_next_page": false,
+  "target_date": "2026-10-30"
+}
+{
+  "case": "misc future",
+  "casts": [
+    {
+      "age": 20,
+      "cast_id": 555,
+      "cast_name": "テル美",
+      "shift": null,
+      "shift_end": null,
+      "shift_start": null,
+      "slot_pattern": "全2コマ TEL (電話のみ)",
+      "slots": [
+        [
+          "18:00",
+          "TEL"
+        ],
+        [
+          "18:30",
+          "TEL"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 0,
+        "open_circles": 0,
+        "reserved_crosses": 0,
+        "tel_cells": 2
+      },
+      "status_norm": "dummy",
+      "status_raw": "ご予約受付中 / TELのみ",
+      "work_hours": null,
+      "work_minutes": null
+    },
+    {
+      "age": null,
+      "cast_id": 666,
+      "cast_name": "×子",
+      "shift": null,
+      "shift_end": "19:00",
+      "shift_start": "18:00",
+      "slot_pattern": "○0コマ / ×2コマ (全コマ×/予約不可)",
+      "slots": [
+        [
+          "18:00",
+          "×"
+        ],
+        [
+          "18:30",
+          "×"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 0,
+        "open_circles": 0,
+        "reserved_crosses": 2,
+        "tel_cells": 0
+      },
+      "status_norm": "unknown",
+      "status_raw": "全コマ×(事前予約不可/おとり候補)",
+      "work_hours": 1.0,
+      "work_minutes": 60
+    },
+    {
+      "age": null,
+      "cast_id": 777,
+      "cast_name": "閑子",
+      "shift": null,
+      "shift_end": null,
+      "shift_start": null,
+      "slot_pattern": "全2コマ ─ (受付終了/待機)",
+      "slots": [
+        [
+          "18:00",
+          "─"
+        ],
+        [
+          "18:30",
+          "─"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 2,
+        "open_circles": 0,
+        "reserved_crosses": 0,
+        "tel_cells": 0
+      },
+      "status_norm": "closed",
+      "status_raw": "時間のみ",
+      "work_hours": null,
+      "work_minutes": null
+    }
+  ],
+  "days_offset": 1,
+  "has_next_page": false,
+  "target_date": "2026-10-31"
+}
+{
+  "case": "next enabled",
+  "casts": [
+    {
+      "age": null,
+      "cast_id": 888,
+      "cast_name": "次子",
+      "shift": null,
+      "shift_end": "10:30",
+      "shift_start": "10:00",
+      "slot_pattern": "○1コマ / ×0コマ (予約可)",
+      "slots": [
+        [
+          "10:00",
+          "○"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 0,
+        "open_circles": 1,
+        "reserved_crosses": 0,
+        "tel_cells": 0
+      },
+      "status_norm": "low",
+      "status_raw": "予約受付中",
+      "work_hours": 0.5,
+      "work_minutes": 30
+    }
+  ],
+  "days_offset": 0,
+  "has_next_page": true,
+  "target_date": "2026-10-30"
+}
+{
+  "case": "next li without anchor",
+  "casts": [
+    {
+      "age": null,
+      "cast_id": 999,
+      "cast_name": "孤子",
+      "shift": null,
+      "shift_end": "10:30",
+      "shift_start": "10:00",
+      "slot_pattern": "○1コマ / ×0コマ (予約可)",
+      "slots": [
+        [
+          "10:00",
+          "○"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 0,
+        "open_circles": 1,
+        "reserved_crosses": 0,
+        "tel_cells": 0
+      },
+      "status_norm": "low",
+      "status_raw": "予約受付中",
+      "work_hours": 0.5,
+      "work_minutes": 30
+    }
+  ],
+  "days_offset": 0,
+  "has_next_page": false,
+  "target_date": "2026-10-30"
+}
+{
+  "case": "unknown data-idx falls back to position",
+  "casts": [
+    {
+      "age": null,
+      "cast_id": 11,
+      "cast_name": "位置子",
+      "shift": null,
+      "shift_end": "10:30",
+      "shift_start": "10:00",
+      "slot_pattern": "○1コマ / ×0コマ (予約可)",
+      "slots": [
+        [
+          "10:00",
+          "○"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 0,
+        "open_circles": 1,
+        "reserved_crosses": 0,
+        "tel_cells": 0
+      },
+      "status_norm": "low",
+      "status_raw": "予約受付中",
+      "work_hours": 0.5,
+      "work_minutes": 30
+    },
+    {
+      "age": null,
+      "cast_id": 22,
+      "cast_name": "隣子",
+      "shift": null,
+      "shift_end": "10:30",
+      "shift_start": "10:00",
+      "slot_pattern": "○1コマ / ×0コマ (予約可)",
+      "slots": [
+        [
+          "10:00",
+          "○"
+        ]
+      ],
+      "slots_summary": {
+        "off_dashes": 0,
+        "open_circles": 1,
+        "reserved_crosses": 0,
+        "tel_cells": 0
+      },
+      "status_norm": "low",
+      "status_raw": "予約受付中",
+      "work_hours": 0.5,
+      "work_minutes": 30
+    }
+  ],
+  "days_offset": 0,
+  "has_next_page": false,
+  "target_date": "2026-10-30"
+}
+{
+  "case": "no table",
+  "casts": [],
+  "days_offset": 0,
+  "has_next_page": false,
+  "target_date": "2026-10-30"
+}
+{
+  "case": "no thead",
+  "casts": [],
+  "days_offset": 0,
+  "has_next_page": false,
+  "target_date": "2026-10-30"
+}
+{
+  "case": "no tbody",
+  "casts": [],
+  "days_offset": 0,
+  "has_next_page": false,
+  "target_date": "2026-10-30"
+}

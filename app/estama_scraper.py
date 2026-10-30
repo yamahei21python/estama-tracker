@@ -34,8 +34,10 @@ except ImportError:
     print("Install them with: pip install requests beautifulsoup4", file=sys.stderr)
     sys.exit(1)
 
-from common import (BASE_DIR, DB_PATH as DEFAULT_DB, SCHEMA_PATH,
-                    SHOPS_JSON_PATH as DEFAULT_SHOPS_JSON, connect_db,
+from common import (BASE_DIR, CHRONO_KEY_SQL, DB_PATH as DEFAULT_DB,
+                    SCHEMA_PATH,
+                    SHOPS_JSON_PATH as DEFAULT_SHOPS_JSON, business_date,
+                    connect_db,
                     load_json, log_scrape, make_session,
                     normalize_status_text, now_jst, parse_clock, save_json)
 
@@ -101,6 +103,45 @@ def parse_shift_details(shift_str, slots=None):
             return start_s, end_s, work_mins, work_hours
 
     return None, None, None, None
+
+
+def _slot_pattern(circles, crosses, dashes, tels, days_offset):
+    if circles > 0:
+        slot_pattern = f"○{circles}コマ / ×{crosses}コマ (予約可)"
+        if tels:
+            slot_pattern += f" + TEL{tels}"
+    elif crosses > 0:
+        if days_offset == 0:
+            slot_pattern = f"○0コマ / ×{crosses}コマ (本日完売)"
+        else:
+            slot_pattern = f"○0コマ / ×{crosses}コマ (全コマ×/予約不可)"
+        if tels:
+            slot_pattern += f" + TEL{tels}"
+    elif tels > 0 and dashes == 0:
+        slot_pattern = f"全{tels}コマ TEL (電話のみ)"
+    elif tels > 0:
+        slot_pattern = f"全{dashes}コマ ─ + TEL{tels} (電話のみ混在)"
+    else:
+        slot_pattern = f"全{dashes}コマ ─ (受付終了/待機)"
+    return slot_pattern
+
+
+def _column_status_text(raw, norm, circles, crosses, tels):
+    if not raw:
+        if norm == "sold_out":
+            return f"本日完売(×{crosses})"
+        if norm in ("available", "low"):
+            return "予約受付中"
+        if crosses > 0 and circles == 0:
+            return "全コマ×(事前予約不可/おとり候補)"
+        if norm == "dummy" or (tels > 0 and circles == 0 and crosses == 0):
+            return "TELのみ"
+        return "時間のみ"
+    # Keep site text, but mark TEL-only in raw when norm is dummy
+    # and the site text would otherwise look bookable.
+    if norm == "dummy" and tels > 0 and circles == 0 and crosses == 0:
+        return f"{raw} / TELのみ"
+    return raw
 
 
 def normalize_slot_mark(mark):
@@ -390,6 +431,13 @@ class EstamaScraper:
         if not thead or not tbody:
             return [], False
 
+        cast_cols = self._parse_cast_columns(thead)
+        self._attach_slots(tbody, cast_cols)
+        return ([self._finalize_column(col, days_offset)
+                 for col in cast_cols],
+                self._has_next_page(soup))
+
+    def _parse_cast_columns(self, thead):
         cast_cols = []
         for th in thead.find_all("th")[1:]:
             name_raw = ""
@@ -426,7 +474,9 @@ class EstamaScraper:
                 "status_raw": status_raw,
                 "slots": []
             })
+        return cast_cols
 
+    def _attach_slots(self, tbody, cast_cols):
         # Vertical key: td[data-idx] == cast_id. Prefer it over column
         # position so a trailing action cell (TEL) cannot shift marks.
         id_to_col = {}
@@ -447,92 +497,56 @@ class EstamaScraper:
                 if target is not None:
                     cast_cols[target]["slots"].append((time_slot, mark))
 
-        final_casts = []
-        for col in cast_cols:
-            # Canonicalize so variant glyphs (◯/〇, ✕, －) count the
-            # same way they are recorded in slot_events.
-            marks = [m for m in (normalize_slot_mark(s[1])
-                                 for s in col["slots"]) if m]
-            circles = marks.count("○")
-            crosses = marks.count("×")
-            dashes = marks.count("─")
-            tels = sum(1 for m in marks if m == "TEL")
+    def _finalize_column(self, col, days_offset):
+        marks = [m for m in (normalize_slot_mark(s[1])
+                             for s in col["slots"]) if m]
+        circles = marks.count("○")
+        crosses = marks.count("×")
+        dashes = marks.count("─")
+        tels = marks.count("TEL")
 
-            raw = col["status_raw"]
-            norm = self._normalize_status(raw, circles, crosses, days_offset)
-            # All-TEL column = dummy cast (not real available/closed).
-            # sold_out text still wins: real demand signal.
-            if tels > 0 and circles == 0 and crosses == 0 and norm != "sold_out":
-                norm = "dummy"
+        raw = col["status_raw"]
+        norm = self._normalize_status(raw, circles, crosses, days_offset)
+        # All-TEL column = dummy cast (not real available/closed).
+        # sold_out text still wins: real demand signal.
+        if tels > 0 and circles == 0 and crosses == 0 and norm != "sold_out":
+            norm = "dummy"
 
-            if circles > 0:
-                slot_pattern = f"○{circles}コマ / ×{crosses}コマ (予約可)"
-                if tels:
-                    slot_pattern += f" + TEL{tels}"
-            elif crosses > 0:
-                if days_offset == 0:
-                    slot_pattern = f"○0コマ / ×{crosses}コマ (本日完売)"
-                else:
-                    slot_pattern = f"○0コマ / ×{crosses}コマ (全コマ×/予約不可)"
-                if tels:
-                    slot_pattern += f" + TEL{tels}"
-            elif tels > 0 and dashes == 0:
-                slot_pattern = f"全{tels}コマ TEL (電話のみ)"
-            elif tels > 0:
-                slot_pattern = f"全{dashes}コマ ─ + TEL{tels} (電話のみ混在)"
-            else:
-                slot_pattern = f"全{dashes}コマ ─ (受付終了/待機)"
+        slot_pattern = _slot_pattern(circles, crosses, dashes, tels,
+                                     days_offset)
+        status_raw = _column_status_text(raw, norm, circles, crosses, tels)
+        shift_start, shift_end, work_minutes, work_hours = \
+            parse_shift_details(col["shift"], col["slots"])
 
-            if not raw:
-                if norm == "sold_out":
-                    status_raw = f"本日完売(×{crosses})"
-                elif norm in ("available", "low"):
-                    status_raw = "予約受付中"
-                elif crosses > 0 and circles == 0:
-                    status_raw = "全コマ×(事前予約不可/おとり候補)"
-                elif norm == "dummy" or (tels > 0 and circles == 0 and crosses == 0):
-                    status_raw = "TELのみ"
-                else:
-                    status_raw = "時間のみ"
-            else:
-                status_raw = raw
-                # Keep site text, but mark TEL-only in raw when norm is dummy
-                # and the site text would otherwise look bookable.
-                if norm == "dummy" and tels > 0 and circles == 0 and crosses == 0:
-                    status_raw = f"{raw} / TELのみ"
+        return {
+            "cast_name": col["cast_name"],
+            "cast_id": col["cast_id"],
+            "age": col["age"],
+            "shift": col["shift"],
+            "shift_start": shift_start,
+            "shift_end": shift_end,
+            "work_minutes": work_minutes,
+            "work_hours": work_hours,
+            "status_raw": status_raw,
+            "status_norm": norm,
+            "slot_pattern": slot_pattern,
+            "slots": [list(s) for s in col["slots"]],
+            "slots_summary": {
+                "open_circles": circles,
+                "reserved_crosses": crosses,
+                "off_dashes": dashes,
+                "tel_cells": tels
+            }
+        }
 
-            shift_start, shift_end, work_minutes, work_hours = parse_shift_details(col["shift"], col["slots"])
-
-            final_casts.append({
-                "cast_name": col["cast_name"],
-                "cast_id": col["cast_id"],
-                "age": col["age"],
-                "shift": col["shift"],
-                "shift_start": shift_start,
-                "shift_end": shift_end,
-                "work_minutes": work_minutes,
-                "work_hours": work_hours,
-                "status_raw": status_raw,
-                "status_norm": norm,
-                "slot_pattern": slot_pattern,
-                "slots": [list(s) for s in col["slots"]],
-                "slots_summary": {
-                    "open_circles": circles,
-                    "reserved_crosses": crosses,
-                    "off_dashes": dashes,
-                    "tel_cells": tels
-                }
-            })
-
-        has_next_page = False
+    def _has_next_page(self, soup):
         next_li = soup.find("li", class_="li_next")
         if next_li and next_li.find("a"):
             a_tag = next_li.find("a")
             classes = a_tag.get("class", [])
             if "btn-disable" not in classes:
-                has_next_page = True
-
-        return final_casts, has_next_page
+                return True
+        return False
 
     def _normalize_status(self, raw, circles, crosses, days_offset):
         """Map text & slot availability to normalized status:
@@ -781,7 +795,7 @@ def _speed_rank_badge(first_time):
 def show_speed_ranking(date_str=None, db_path=DEFAULT_DB, shop_id=DEFAULT_SHOP_ID):
     """Analyze and display which casts sold out earliest on a given date."""
     if date_str is None:
-        date_str = (now_jst() - timedelta(hours=6)).strftime("%Y-%m-%d")
+        date_str = business_date()
 
     conn = connect_db(db_path, apply_schema=False)
     cur = conn.cursor()
@@ -795,10 +809,10 @@ def show_speed_ranking(date_str=None, db_path=DEFAULT_DB, shop_id=DEFAULT_SHOP_I
     # Grouped by cast_id (TEXT-cast, name fallback): a renamed cast
     # (one id, two names) appears once; name / shift / work_hours all
     # come from the latest sold-out observation so they stay consistent.
-    query = """
+    query = f"""
     WITH so AS (
       SELECT CAST(COALESCE(cast_id, cast_name) AS TEXT) AS g,
-             COALESCE(fetched_at, '9999-12-31 ' || IFNULL(fetched_time, '00:00')) AS k,
+             {CHRONO_KEY_SQL} AS k,
              cast_name, shift, work_hours, snapshot_id
       FROM snapshots
       WHERE target_date = ? AND shop_id = ? AND status_norm = 'sold_out'
@@ -826,7 +840,7 @@ def show_speed_ranking(date_str=None, db_path=DEFAULT_DB, shop_id=DEFAULT_SHOP_I
     cur.execute(
         "SELECT fetched_time FROM snapshots WHERE target_date = ? AND shop_id = ? "
         "GROUP BY fetched_time "
-        "ORDER BY MIN(COALESCE(fetched_at, '9999-12-31 ' || IFNULL(fetched_time, '00:00')))",
+        "ORDER BY MIN(" + CHRONO_KEY_SQL + ")",
         (date_str, shop_id)
     )
     recorded_times = [r[0] for r in cur.fetchall()]
@@ -937,7 +951,7 @@ def load_shops_json(shops_json_path=DEFAULT_SHOPS_JSON):
     return data.get("shops", [])
 
 
-def main():
+def _build_parser():
     parser = argparse.ArgumentParser(
         description="Scrape and analyze estama.jp schedule & track sold-out speed across hourly checkpoints."
     )
@@ -953,80 +967,71 @@ def main():
     parser.add_argument("--speed-rank", action="store_true", help="Show sold-out speed ranking and timeline for today")
     parser.add_argument("--date", type=str, help="Target date for --speed-rank (YYYY-MM-DD)")
     parser.add_argument("--cron-guide", action="store_true", help="Display the recommended schedule (hourly checkpoints via runner.py)")
+    return parser
 
-    args = parser.parse_args()
 
-    if args.cron_guide:
-        print_cron_guide()
-        return
+def _run_all_shops(args):
+    shops = load_shops_json(args.shops_json)
+    total_shops = len(shops)
+    total_imported = 0
+    total_snapshot_files = []
+    all_data = []
 
-    if args.speed_rank:
-        show_speed_ranking(date_str=args.date, db_path=args.db, shop_id=args.shop_id)
-        return
+    print(f"{COLOR_BOLD}🏪 全店一括巡回モード: {total_shops}店舗 × {args.days}日分{COLOR_RESET}", file=sys.stderr)
+    print("=" * 75, file=sys.stderr)
 
-    # --- 全店一括巡回モード ---
-    if args.all_shops:
-        shops = load_shops_json(args.shops_json)
-        total_shops = len(shops)
-        total_imported = 0
-        total_snapshot_files = []
-        all_data = []
+    for idx, shop_entry in enumerate(shops, 1):
+        try:
+            shop_id = int(shop_entry["shop_id"])
+        except (KeyError, TypeError, ValueError) as e:
+            print(f"[{idx:2d}/{total_shops}] {COLOR_RED}不正な店舗エントリ"
+                  f"をスキップ: {e}{COLOR_RESET}", file=sys.stderr)
+            continue
+        shop_name = shop_entry.get("name", f"Shop {shop_id}")
+        print(f"[{idx:2d}/{total_shops}] {COLOR_CYAN}{shop_name}{COLOR_RESET} (ID: {shop_id})", file=sys.stderr)
 
-        print(f"{COLOR_BOLD}🏪 全店一括巡回モード: {total_shops}店舗 × {args.days}日分{COLOR_RESET}", file=sys.stderr)
-        print("=" * 75, file=sys.stderr)
+        try:
+            scraper = EstamaScraper(shop_id=shop_id)
+            data = scraper.fetch_multi_days(num_days=args.days)
 
-        for idx, shop_entry in enumerate(shops, 1):
-            try:
-                shop_id = int(shop_entry["shop_id"])
-            except (KeyError, TypeError, ValueError) as e:
-                print(f"[{idx:2d}/{total_shops}] {COLOR_RED}不正な店舗エントリ"
-                      f"をスキップ: {e}{COLOR_RESET}", file=sys.stderr)
-                continue
-            shop_name = shop_entry.get("name", f"Shop {shop_id}")
-            print(f"[{idx:2d}/{total_shops}] {COLOR_CYAN}{shop_name}{COLOR_RESET} (ID: {shop_id})", file=sys.stderr)
+            if not args.json:
+                print_summary_report(data)
+            else:
+                all_data.append(data)
 
-            try:
-                scraper = EstamaScraper(shop_id=shop_id)
-                data = scraper.fetch_multi_days(num_days=args.days)
+            if args.save_snapshots:
+                files = export_to_snapshots(data)
+                total_snapshot_files.extend(files)
+                print(f"  {COLOR_GREEN}✅ Snapshot: {len(files)}ファイル保存{COLOR_RESET}", file=sys.stderr)
 
-                if not args.json:
-                    print_summary_report(data)
-                else:
-                    all_data.append(data)
+            if args.import_db:
+                count = import_into_db(data, db_path=args.db)
+                total_imported += count
+                log_scrape(args.db, shop_id,
+                           "ok" if count else "empty", count)
+                print(f"  {COLOR_GREEN}✅ DB: {count}件 インポート{COLOR_RESET}", file=sys.stderr)
 
-                if args.save_snapshots:
-                    files = export_to_snapshots(data)
-                    total_snapshot_files.extend(files)
-                    print(f"  {COLOR_GREEN}✅ Snapshot: {len(files)}ファイル保存{COLOR_RESET}", file=sys.stderr)
+        except Exception as e:
+            if args.import_db:
+                log_scrape(args.db, shop_id, "fail", 0, str(e))
+            print(f"  {COLOR_RED}❌ エラー: {e}{COLOR_RESET}", file=sys.stderr)
 
-                if args.import_db:
-                    count = import_into_db(data, db_path=args.db)
-                    total_imported += count
-                    log_scrape(args.db, shop_id,
-                               "ok" if count else "empty", count)
-                    print(f"  {COLOR_GREEN}✅ DB: {count}件 インポート{COLOR_RESET}", file=sys.stderr)
+        # 店舗間インターバル (最後の店舗以外)
+        if idx < total_shops:
+            time.sleep(0.8)
 
-            except Exception as e:
-                if args.import_db:
-                    log_scrape(args.db, shop_id, "fail", 0, str(e))
-                print(f"  {COLOR_RED}❌ エラー: {e}{COLOR_RESET}", file=sys.stderr)
+    # 全店完了サマリー
+    print("\n" + "=" * 75, file=sys.stderr)
+    print(f"{COLOR_BOLD}🎉 全店巡回完了: {total_shops}店舗{COLOR_RESET}", file=sys.stderr)
+    if args.import_db:
+        print(f"{COLOR_GREEN}✅ 総インポート件数: {total_imported}件 -> {args.db}{COLOR_RESET}")
+    if args.save_snapshots:
+        print(f"{COLOR_GREEN}✅ 総スナップショット: {len(total_snapshot_files)}ファイル{COLOR_RESET}")
+    if args.json:
+        print(json.dumps(all_data, ensure_ascii=False, indent=2))
 
-            # 店舗間インターバル (最後の店舗以外)
-            if idx < total_shops:
-                time.sleep(0.8)
 
-        # 全店完了サマリー
-        print("\n" + "=" * 75, file=sys.stderr)
-        print(f"{COLOR_BOLD}🎉 全店巡回完了: {total_shops}店舗{COLOR_RESET}", file=sys.stderr)
-        if args.import_db:
-            print(f"{COLOR_GREEN}✅ 総インポート件数: {total_imported}件 -> {args.db}{COLOR_RESET}")
-        if args.save_snapshots:
-            print(f"{COLOR_GREEN}✅ 総スナップショット: {len(total_snapshot_files)}ファイル{COLOR_RESET}")
-        if args.json:
-            print(json.dumps(all_data, ensure_ascii=False, indent=2))
-        return
-
-    # --- 単店舗モード ---
+def _run_single_shop(args):
     shop_id = args.shop_id
     if args.shop_url:
         m = re.search(r"/shop/(\d+)/", args.shop_url)
@@ -1060,6 +1065,26 @@ def main():
         count = import_into_db(data, db_path=args.db)
         log_scrape(args.db, shop_id, "ok" if count else "empty", count)
         print(f"\n{COLOR_GREEN}✅ Successfully imported {count} cast rows (checkpoint: {data['fetched_time']}) into {args.db}!{COLOR_RESET}")
+
+
+def main():
+    args = _build_parser().parse_args()
+
+    if args.cron_guide:
+        print_cron_guide()
+        return
+
+    if args.speed_rank:
+        show_speed_ranking(date_str=args.date, db_path=args.db, shop_id=args.shop_id)
+        return
+
+    # --- 全店一括巡回モード ---
+    if args.all_shops:
+        _run_all_shops(args)
+        return
+
+    # --- 単店舗モード ---
+    _run_single_shop(args)
 
 
 if __name__ == "__main__":

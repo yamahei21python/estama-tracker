@@ -32,17 +32,22 @@ runner.py = 巡回・取込・検証・日次アーカイブ・data ブランチ
 
 | パス | 役割 |
 |---|---|
-| `runner.py` | 運用ランナー。ロック・DB検証・アーカイブ・data ブランチへのアップロード（blob SHA 照合／GitHub では失敗時に前版へ復元）・`run_log` |
+| `runner.py` | 運用ランナー。ロック・DB検証・アーカイブ・publish・`run_log` |
+| `storage.py` | 保存バックエンド（GitHub data ブランチ／Cloudflare R2／ローカルミラー）。書込み後の検証・復元用ヘルパー |
 | `app/estama_scraper.py` | 出勤表の巡回・`snapshots`/`slot_events` への取込・完売スピード分析 |
 | `app/ranking_scraper.py` | 週間人気ランキング（14エリア×30人）取得・`cast_rankings` 保存・ウォッチリスト同期 |
-| `app/estama_tracker.py` | 分析 CLI。report / alert / sellout-forecast / monitor / notify / dashboard / cast など |
+| `app/estama_tracker.py` | 分析 CLI（report / alert / sellout-forecast / monitor / notify / dashboard / cast）。解析とディスパッチのみで、計算と整形は下の3モジュール |
+| `app/queries.py` | R3 最終状態のSQL・日付/キャストキー解決・店名/エリア参照など、分析側の共通クエリ |
+| `app/analysis.py` | アラート判定（普段完売なのに空き）・根拠行・`daily_cast_status` ロールアップ |
+| `app/report_sections.py` | レポート各節・完売予測・監視・notify・HTML ダッシュボードの生成 |
 | `app/bakusai.py` | 爆サイ.com のスレッド発見・本文取得（専用 DB `bakusai.db`、VMローカル） |
 | `app/evidence.py` | alert の根拠表示（口コミ・爆サイ・枠消失・出典URL。表示専用） |
 | `app/common.py` | 共通部品（パス、UA、セッション、DB接続、ステータス正規化、`parse_clock` など） |
 | `app/schema.sql` | スキーマ（`shops` / `snapshots` / `cast_rankings` / `daily_cast_status` / `run_log` / `scrape_log` / `forecast_eval` / `slot_events` / `cast_watch`） |
 | `app/shops.json` | 巡回対象のウォッチリスト |
 | `app/deep_shops.json` | deep tier（爆サイでスレッドが確認できた店だけの固定リスト。口コミ順位で埋めない） |
-| `tests/` | 標準ライブラリのみのテスト（15ファイル、ネットワーク不要） |
+| `tests/` | テスト（22ファイル、外部通信なし。import に requests / beautifulsoup4 が必要） |
+| `scripts/oneoff/` | 退役した一回限りの分析スクリプト（本体 `app/` からは参照されない） |
 
 DB（`*.db`）と `storage.json`、`banned_shops.json`、`dashboard.html`、`logs/`、`staging/`、`r2_local/` はランタイム成果物のため git 管理外。`bakusai.db` は VM ローカルの別 DB で、data ブランチにも上げない。`.perch/mcp.json`（ローカルCLI設定・認証情報を含み得る）も管理外。
 
@@ -52,7 +57,7 @@ DB（`*.db`）と `storage.json`、`banned_shops.json`、`dashboard.html`、`log
 python3 -m venv venv
 ./venv/bin/pip install requests beautifulsoup4        # R2 を使う場合のみ boto3
 
-# スキーマ適用（冪等。既存 DB に slot_events 等を追加するだけ。snapshots は不変）
+# スキーマ適用（冪等。CREATE IF NOT EXISTS + PRAGMA user_version の順序付き移行）
 ./venv/bin/python app/estama_tracker.py verify --db app/estama.db
 
 # 1店だけ取得して取り込み（既定: 40900 SUPER AKUMA GIRLS）
@@ -105,9 +110,11 @@ publish は1実行1コミット。書込み直後に blob SHA を照合し、不
 
 日次アーカイブは「閉じた営業日」（期待営業日の前日）をキーに `archive/estama-<営業日>.db` を1回だけ保存する。サイトが最終チェックポイントより先に日付を切り替えても取り逃さず、アーカイブ失敗時は checkpoint/ranking を止めずに次回再試行する（検証不成立のキーは削除）。
 
+保持ポリシーは `storage.json` の `{"archive_retention": {"days": 30, "weekly": true}}` で有効化する（未設定なら削除しない）。直近30日は日次で残し、それ以前は月曜分のみ残す。publish 成功後に best-effort で実行され、日付を解釈できないキーには触れない。
+
 ## テスト
 
-すべて標準ライブラリのみ・ネットワーク不要。
+外部通信なし（`requests` / `beautifulsoup4` のインストールは必要）。main への push と PR では GitHub Actions（`.github/workflows/ci.yml`）が同じスイートを実行する。
 
 ```bash
 for t in tests/test_*.py; do ./venv/bin/python "$t" || break; done
@@ -120,9 +127,19 @@ for t in tests/test_*.py; do ./venv/bin/python "$t" || break; done
 | `test_evidence.py` | 根拠表示（口コミ/爆サイ/枠消失/出典・失敗時も alert 不変） |
 | `test_bakusai.py` | 発見・紐付け信頼度・検索フォールバック・crawl 再開/重複排除・404継続・リダイレクト課金 |
 | `test_monitor.py` | 監視の警告条件 |
+| `test_schema_migration.py` | `user_version` 移行（旧インデックス削除・再構築・クエリ計画） |
+| `test_chrono.py` | 営業日 06:00 境界の真理表・`chrono_key` と SQL の一致 |
+| `test_archive_retention.py` | アーカイブ保持（直近N日＋週次・未設定なら削除しない） |
 | `test_gh_storage.py` | data ブランチ保存の blob 検証・復元 |
 | `test_runner.py` | ロック・検証・アーカイブ（閉じた営業日）・1コミット publish・publish 失敗の exit 1 |
-| ほか（final_states / rollup / prune / speed_rank / timestamps / normalize / tracker_alert / gemini_retry） | 既存の分析・取込ロジック |
+| `test_report_sections.py` | 未実行だった6節（timing / area / shops / ranking / sellout-forecast / print_report）を固定DBで検証 |
+| `test_cli_wiring.py` | CLI 配線（rollup / report / dashboard / notify / counts / alert の出力と exit code） |
+| `test_report_golden.py` | report / dashboard / notify のゴールデン（`tests/golden/`、時計固定） |
+| `test_parse_golden.py` | 出勤表パースのゴールデン（今日/未来/境界HTML・`tests/golden/parse_schedule.txt`） |
+| `test_ranking_parse.py` | ランキングHTML fixture（PR/画像順位/リンク欠落の除外・DB取込） |
+| ほか（final_states / rollup / prune / speed_rank / timestamps / normalize / tracker_alert） | 既存の分析・取込ロジック |
+
+ゴールデンは差分を確認してから意図的に更新する: `ESTAMA_UPDATE_GOLDEN=1 python3 tests/test_report_golden.py`（`test_parse_golden.py` も同様）。
 
 ## データの注意（必読・抜粋）
 

@@ -24,11 +24,24 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 JST = ZoneInfo("Asia/Tokyo")
+
+# Bumped by _migrate_schema; stored in PRAGMA user_version.
+SCHEMA_VERSION = 1
+
+# The site flips its business date around 05:00-06:00; everything newer
+# than 06:00 JST belongs to that calendar date's business day.
+BUSINESS_DAY_FLIP_HOUR = 6
+
+# Row-level chronological sort key: full fetched_at when present, an
+# HH:MM-only fallback for legacy rows (day unknown, so it sorts behind
+# full-timestamp rows). Python twin: chrono_key().
+CHRONO_KEY_SQL = (
+    "COALESCE(fetched_at, '9999-12-31 ' || IFNULL(fetched_time, '00:00'))")
 
 
 def now_jst() -> datetime:
@@ -42,6 +55,27 @@ def now_jst() -> datetime:
     morning, e.g. the 06:15 ranking run).
     """
     return datetime.now(JST)
+
+
+def business_date(now: datetime | None = None) -> str:
+    """YYYY-MM-DD of the business day `now` belongs to (flip 06:00)."""
+    return ((now or now_jst()) - timedelta(hours=BUSINESS_DAY_FLIP_HOUR)
+            ).date().isoformat()
+
+
+def business_day_start(date: str, tz=None) -> datetime:
+    """Start timestamp (06:00) of a business date, in `tz` (default JST)."""
+    return datetime.fromisoformat(
+        f"{date}T{BUSINESS_DAY_FLIP_HOUR:02d}:00:00").replace(
+            tzinfo=tz or JST)
+
+
+def chrono_key(fetched_at, fetched_time=None) -> str:
+    """Python twin of CHRONO_KEY_SQL (keep the two in sync)."""
+    if fetched_at:
+        return str(fetched_at)
+    return "9999-12-31 " + (fetched_time or "00:00")
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "estama.db"
@@ -73,7 +107,30 @@ def connect_db(db_path=None, apply_schema: bool = True) -> sqlite3.Connection:
         conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
         _migrate_status_norm_dummy(conn)
         _migrate_reclassify_decoy(conn)
+        _migrate_schema(conn)
     return conn
+
+
+def _migrate_schema(conn) -> None:
+    """Ordered migrations, versioned via PRAGMA user_version.
+
+    schema.sql only adds what is missing (CREATE ... IF NOT EXISTS), so
+    it always runs first; the migrations here cover changes that cannot
+    be expressed additively (dropped indexes). Idempotent: a DB already
+    at SCHEMA_VERSION is untouched, and every DB created before this
+    mechanism is at version 0 on its first connect.
+    """
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version < 1:
+        # v1: retire indexes keyed on pre-fetched_at columns. All
+        # time-series reads order by fetched_at (idx_snapshots_date_at)
+        # and nothing filters on work_hours, so both only cost write
+        # time. The UNIQUE key stays as-is: fetched_time is still the
+        # checkpoint label the scraper dedupes on.
+        conn.execute("DROP INDEX IF EXISTS idx_snapshots_time")
+        conn.execute("DROP INDEX IF EXISTS idx_snapshots_work_hours")
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.commit()
 
 
 def _migrate_reclassify_decoy(conn) -> None:
@@ -152,12 +209,12 @@ def _migrate_status_norm_dummy(conn) -> None:
         ALTER TABLE snapshots_new RENAME TO snapshots;
         CREATE INDEX IF NOT EXISTS idx_snapshots_cast_date
             ON snapshots (shop_id, cast_name, target_date);
+        CREATE INDEX IF NOT EXISTS idx_snapshots_castid_date
+            ON snapshots (shop_id, cast_id, target_date);
         CREATE INDEX IF NOT EXISTS idx_snapshots_status_date
             ON snapshots (status_norm, target_date);
-        CREATE INDEX IF NOT EXISTS idx_snapshots_time
-            ON snapshots (target_date, fetched_time);
-        CREATE INDEX IF NOT EXISTS idx_snapshots_work_hours
-            ON snapshots (work_hours);
+        CREATE INDEX IF NOT EXISTS idx_snapshots_date_at
+            ON snapshots (target_date, fetched_at);
         """
     )
     conn.commit()

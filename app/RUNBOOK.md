@@ -29,6 +29,20 @@ export ESTAMA_REVIEW_DB=/path/to/kagawa_menes.db
 
 レビュー DB が無くても alert は動く（口コミ根拠の行が省略されるだけ）。
 
+### 保存先の切り替え（任意・R2）
+
+GitHub `data` ブランチは毎時DB全体を上書きするため履歴が単調増加する（約120MB/日）。R2 へ切り替える場合は環境変数を設定し、`storage.json` から `backend: github` を外す（保持設定を使うならファイルは残す）:
+
+```bash
+export ESTAMA_R2_ENDPOINT=https://...
+export ESTAMA_R2_BUCKET=...
+export ESTAMA_R2_ACCESS_KEY_ID=...
+export ESTAMA_R2_SECRET_ACCESS_KEY=...
+# storage.json: {"archive_retention": {"days": 30, "weekly": true}}
+```
+
+保持設定が未設定の間はアーカイブを削除しない。有効化すると publish 成功後に best-effort で走り、直近N日は日次、それ以前は月曜分だけ残す。
+
 ---
 
 ## 2. 定期ジョブ（既存 cron のまま）

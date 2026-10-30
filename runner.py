@@ -31,22 +31,16 @@ Usage:
 
 from __future__ import annotations
 
-import base64
 import fcntl
-import gzip
-import hashlib
 import json
 import os
-import shutil
+import re
 import sqlite3
 import subprocess
 import sys
-import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
-JST = ZoneInfo("Asia/Tokyo")
 BASE = Path(os.environ.get("ESTAMA_VM_BASE", Path(__file__).resolve().parent))
 APP = BASE / "app"
 DB = APP / "estama.db"
@@ -54,15 +48,18 @@ VENV_PY = BASE / "venv" / "bin" / "python"
 LOCK_FILE = BASE / "runner.lock"
 STATE_FILE = BASE / "archive_state.json"
 LOG_DIR = BASE / "logs"
-LOCAL_MIRROR = BASE / "r2_local"
 STAGING_DIR = BASE / "staging"
 
+CODE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(CODE_DIR))
+sys.path.insert(0, str(CODE_DIR / "app"))
+from common import business_date, now_jst  # noqa: E402
+from storage import (  # noqa: E402
+    backend_name, gh_live_blob, gh_restore, storage_config, storage_delete,
+    storage_exists, storage_list, storage_put, storage_verify,
+)
+
 LIVE_KEY = "estama.db"
-BUSINESS_DAY_FLIP_HOUR = 6  # site business date flips ~05:00-06:00; use 06:00
-
-
-def now_jst() -> datetime:
-    return datetime.now(JST)
 
 
 def log(msg: str) -> None:
@@ -72,224 +69,6 @@ def log(msg: str) -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     with open(LOG_DIR / f"runner-{now_jst():%Y-%m-%d}.log", "a") as fh:
         fh.write(line + "\n")
-
-
-# ---------------------------------------------------------------- storage ---
-
-def r2_configured() -> bool:
-    return all(
-        os.environ.get(k)
-        for k in ("ESTAMA_R2_ENDPOINT", "ESTAMA_R2_BUCKET",
-                  "ESTAMA_R2_ACCESS_KEY_ID", "ESTAMA_R2_SECRET_ACCESS_KEY")
-    )
-
-
-def _s3():
-    import boto3
-
-    return boto3.client(
-        "s3",
-        endpoint_url=os.environ["ESTAMA_R2_ENDPOINT"],
-        aws_access_key_id=os.environ["ESTAMA_R2_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["ESTAMA_R2_SECRET_ACCESS_KEY"],
-        region_name="auto",
-    )
-
-
-STORAGE_CONFIG = BASE / "storage.json"
-
-
-def storage_config() -> dict:
-    if STORAGE_CONFIG.exists():
-        return json.loads(STORAGE_CONFIG.read_text())
-    return {}
-
-
-def backend_name() -> str:
-    if storage_config().get("backend") == "github":
-        return "github"
-    if r2_configured():
-        return "R2"
-    return "local-mirror"
-
-
-# ------------------------------------------------------- GitHub backend ----
-# Objects live as files on the `data` branch of the code repo. DB payloads
-# are gzip-compressed (deterministic, mtime=0) so blob SHAs are reproducible:
-# verification compares the remote blob SHA against the locally computed
-# git blob SHA of the (compressed) bytes - stronger than a size check.
-# Auth: the custom.github-cli connector surrogate, swapped for the real PAT
-# on egress to api.github.com (same mechanics as the connector helper).
-
-GH_CONNECTOR = "custom.github-cli"
-GH_API = "https://api.github.com"
-GH_CRED_LIB = "/opt/muse/skills/custom-connector-setup/bin"
-
-
-def gh_path(key: str) -> str:
-    if key.endswith(".db"):
-        return key + ".gz"
-    return key
-
-
-def gh_blob_sha(data: bytes) -> str:
-    return hashlib.sha1(
-        b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
-
-
-def gh_payload(local_file: Path, key: str) -> bytes:
-    data = local_file.read_bytes()
-    if gh_path(key) != key:
-        data = gzip.compress(data, mtime=0)
-    return data
-
-
-def _gh_api(method: str, path: str, body: dict | None = None,
-            timeout: int = 180) -> dict:
-    sys.path.insert(0, GH_CRED_LIB)
-    from dynamic_credentials import add_surrogate_to_request
-
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(GH_API + path, data=data, method=method)
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("X-GitHub-Api-Version", "2022-11-28")
-    if data is not None:
-        req.add_header("Content-Type", "application/json")
-    add_surrogate_to_request(req, GH_CONNECTOR, allowed_hosts=["api.github.com"])
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
-    return json.loads(raw) if raw else {}
-
-
-def _gh_repo_branch() -> tuple[str, str]:
-    cfg = storage_config()
-    return cfg.get("repo", "yamahei21python/estama-tracker"), cfg.get("branch", "data")
-
-
-def _gh_head() -> tuple[str, str]:
-    repo, branch = _gh_repo_branch()
-    ref = _gh_api("GET", f"/repos/{repo}/git/ref/heads/{branch}")
-    commit_sha = ref["object"]["sha"]
-    commit = _gh_api("GET", f"/repos/{repo}/git/commits/{commit_sha}")
-    return commit_sha, commit["tree"]["sha"]
-
-
-def _gh_entries() -> dict:
-    """path -> tree entry for every blob on the data branch."""
-    repo, _ = _gh_repo_branch()
-    _, tree_sha = _gh_head()
-    out = _gh_api("GET", f"/repos/{repo}/git/trees/{tree_sha}?recursive=1")
-    return {e["path"]: e for e in out.get("tree", []) if e["type"] == "blob"}
-
-
-def _gh_commit(entries: list[dict], message: str) -> None:
-    repo, branch = _gh_repo_branch()
-    head_sha, tree_sha = _gh_head()
-    tree = _gh_api("POST", f"/repos/{repo}/git/trees",
-                   {"base_tree": tree_sha, "tree": entries})
-    commit = _gh_api("POST", f"/repos/{repo}/git/commits",
-                     {"message": message, "tree": tree["sha"],
-                      "parents": [head_sha]})
-    _gh_api("PATCH", f"/repos/{repo}/git/refs/heads/{branch}",
-            {"sha": commit["sha"]})
-
-
-def _gh_put(key: str, local_file: Path) -> None:
-    repo, _ = _gh_repo_branch()
-    data = gh_payload(local_file, key)
-    blob = _gh_api("POST", f"/repos/{repo}/git/blobs",
-                   {"content": base64.b64encode(data).decode(),
-                    "encoding": "base64"})
-    if blob["sha"] != gh_blob_sha(data):
-        raise IOError(f"github blob sha mismatch for {key}")
-    _gh_commit([{"path": gh_path(key), "mode": "100644", "type": "blob",
-                 "sha": blob["sha"]}], f"data: update {key}")
-
-
-def _gh_size(key: str) -> int | None:
-    entry = _gh_entries().get(gh_path(key))
-    return int(entry["size"]) if entry else None
-
-
-def _gh_verify(key: str, local_file: Path) -> bool:
-    entry = _gh_entries().get(gh_path(key))
-    return bool(entry) and entry["sha"] == gh_blob_sha(gh_payload(local_file, key))
-
-
-def _gh_live_blob(key: str) -> str | None:
-    """Blob SHA currently stored at key (None when missing).
-
-    API errors propagate on purpose: upload_db must abort before
-    writing when it cannot capture a rollback target."""
-    entry = _gh_entries().get(gh_path(key))
-    return entry["sha"] if entry else None
-
-
-def _gh_restore(key: str, blob_sha: str) -> None:
-    """Point key back at a previously verified blob in one commit."""
-    _gh_commit([{"path": gh_path(key), "mode": "100644", "type": "blob",
-                 "sha": blob_sha}],
-               f"data: restore {key} (post-write verify failed)")
-
-
-def _gh_delete(key: str) -> None:
-    _gh_commit([{"path": gh_path(key), "mode": "100644", "type": "blob",
-                 "sha": None}], f"data: delete {key}")
-
-
-# ------------------------------------------------------------ dispatch -----
-
-def storage_put(key: str, local_file: Path) -> None:
-    b = backend_name()
-    if b == "github":
-        _gh_put(key, local_file)
-    elif b == "R2":
-        _s3().upload_file(str(local_file), os.environ["ESTAMA_R2_BUCKET"], key)
-    else:
-        dest = LOCAL_MIRROR / key
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(local_file, dest)
-
-
-def storage_size(key: str) -> int | None:
-    b = backend_name()
-    if b == "github":
-        try:
-            return _gh_size(key)
-        except Exception:
-            return None
-    if b == "R2":
-        try:
-            head = _s3().head_object(Bucket=os.environ["ESTAMA_R2_BUCKET"], Key=key)
-            return int(head["ContentLength"])
-        except Exception:
-            return None
-    p = LOCAL_MIRROR / key
-    return p.stat().st_size if p.exists() else None
-
-
-def storage_verify(key: str, local_file: Path) -> bool:
-    """True when the stored object provably matches the local file."""
-    if backend_name() == "github":
-        try:
-            return _gh_verify(key, local_file)
-        except Exception:
-            return False
-    return storage_size(key) == local_file.stat().st_size
-
-
-def storage_delete(key: str) -> None:
-    b = backend_name()
-    if b == "github":
-        _gh_delete(key)
-    elif b == "R2":
-        _s3().delete_object(Bucket=os.environ["ESTAMA_R2_BUCKET"], Key=key)
-    else:
-        (LOCAL_MIRROR / key).unlink(missing_ok=True)
-
-
-def storage_exists(key: str) -> bool:
-    return storage_size(key) is not None
 
 
 # ------------------------------------------------------------------- DB -----
@@ -353,7 +132,7 @@ def upload_db() -> dict:
         snapshot_copy(DB, snap)
         verify_db(snap)  # the copy itself must be intact before it can go live
         size = snap.stat().st_size
-        prev_blob = (_gh_live_blob(LIVE_KEY)
+        prev_blob = (gh_live_blob(LIVE_KEY)
                      if backend_name() == "github" else None)
         storage_put(LIVE_KEY, snap)
         if not storage_verify(LIVE_KEY, snap):
@@ -361,7 +140,7 @@ def upload_db() -> dict:
         if not storage_verify(LIVE_KEY, snap):
             if backend_name() == "github":
                 if prev_blob:
-                    _gh_restore(LIVE_KEY, prev_blob)
+                    gh_restore(LIVE_KEY, prev_blob)
                     log(f"upload: verified live write failed, restored {LIVE_KEY}")
                 else:
                     storage_delete(LIVE_KEY)
@@ -376,7 +155,7 @@ def upload_db() -> dict:
 # --------------------------------------------------------------- archive ----
 
 def expected_business_date(now: datetime) -> str:
-    return (now - timedelta(hours=BUSINESS_DAY_FLIP_HOUR)).date().isoformat()
+    return business_date(now)
 
 
 def maybe_archive(now: datetime) -> str | None:
@@ -424,6 +203,56 @@ def maybe_archive(now: datetime) -> str | None:
     STATE_FILE.write_text(json.dumps(state))
     log(f"archive ok: {key} (business date {closed} closed)")
     return key
+
+
+# ------------------------------------------------------ archive retention ---
+# Optional bounded retention for archive/estama-<date>.db. Off unless
+# storage.json carries {"archive_retention": {"days": 30, "weekly": true}}.
+# Everything newer than `days` is kept; older archives are kept only when
+# their date falls on a Monday (weekly=true), which bounds growth without
+# losing a coarse history.
+
+ARCHIVE_KEY_RE = re.compile(r"^archive/estama-(\d{4}-\d{2}-\d{2})\.db(?:\.gz)?$")
+
+
+def stale_archive_keys(keys: list[str], today, days: int,
+                       weekly: bool) -> list[str]:
+    cutoff = today - timedelta(days=days)
+    stale = []
+    for key in keys:
+        m = ARCHIVE_KEY_RE.match(key)
+        if not m:
+            continue  # never touch anything we cannot date-parse
+        day = datetime.fromisoformat(m.group(1)).date()
+        if day >= cutoff:
+            continue
+        if weekly and day.weekday() == 0:
+            continue
+        stale.append(key)
+    return sorted(stale)
+
+
+def prune_archives(now: datetime) -> list[str]:
+    cfg = storage_config().get("archive_retention") or {}
+    days = cfg.get("days")
+    if not days:
+        return []  # unset: no deletion
+    stale = stale_archive_keys(
+        storage_list("archive/"), now.date(), int(days),
+        bool(cfg.get("weekly", True)))
+    for key in stale:
+        storage_delete(key)
+        log(f"archive retention: deleted {key}")
+    if stale:
+        log(f"archive retention: {len(stale)} old archive(s) removed")
+    return stale
+
+
+def _retention_best_effort() -> None:
+    try:
+        prune_archives(now_jst())
+    except Exception as exc:
+        log(f"archive retention failed (job continues): {type(exc).__name__}: {exc}")
 
 
 # ---------------------------------------------------------------- run_log ---
@@ -697,6 +526,7 @@ def main() -> int:
             run_log_close(run_id, "fail",
                           f"job ok, publish failed: {type(exc).__name__}: {exc}")
             return 1
+        _retention_best_effort()
     log(f"DONE {job}")
     return 0
 

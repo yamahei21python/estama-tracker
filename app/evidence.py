@@ -22,12 +22,17 @@ import unicodedata
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
-DEFAULT_REVIEW_DB = Path(os.environ.get("ESTAMA_REVIEW_DB") or
-                         Path.home() / "Myproject" / "menesureview"
-                         / "kagawa_menes.db")
-DEFAULT_BAKUSAI_DB = Path(os.environ.get("ESTAMA_BAKUSAI_DB") or
-                          BASE / "bakusai.db")
 MIN_BAKUSAI_CONFIDENCE = 0.8
+
+
+def default_review_db() -> Path:
+    """Review DB path; env is read lazily so tests can redirect it."""
+    return Path(os.environ.get("ESTAMA_REVIEW_DB") or
+                Path.home() / "Myproject" / "menesureview" / "kagawa_menes.db")
+
+
+def default_bakusai_db() -> Path:
+    return Path(os.environ.get("ESTAMA_BAKUSAI_DB") or BASE / "bakusai.db")
 
 # Review-text feature tags: counted per review (a review mentioning
 # "スタイル" twice still counts once), so "美人×7" means 7 reviews said
@@ -242,9 +247,9 @@ def collect(conn, shop_id, shop_name, cast_name, date,
             review_db=None, bakusai_db=None):
     """Everything evidence_lines needs, as one dict (None = unavailable)."""
     rconn = _open_ro(review_db if review_db is not None
-                     else DEFAULT_REVIEW_DB)
+                     else default_review_db())
     bconn = _open_ro(bakusai_db if bakusai_db is not None
-                     else DEFAULT_BAKUSAI_DB)
+                     else default_bakusai_db())
     try:
         urlrow = conn.execute(
             "SELECT source_url FROM shops WHERE shop_id = ?",
