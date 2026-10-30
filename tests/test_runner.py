@@ -74,11 +74,36 @@ check("no archive before the flip", r.maybe_archive(early) is None)
 r.upload_db()
 live = SCRATCH / "r2_local" / "estama.db"
 check("live key exists after upload", live.exists())
-check("staging key cleaned up", not (SCRATCH / "r2_local" / "estama.db.staging").exists())
+check("upload writes the live DB only (one object, no staging key)",
+      sorted(p.name for p in (SCRATCH / "r2_local").iterdir())
+      == ["archive", "estama.db"])
 con = sqlite3.connect(live)
 check("uploaded DB readable with 3 rows",
       con.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0] == 3)
 con.close()
+
+# upload_db: a failed post-write verification retries once, then
+# restores the previous live blob so the branch never keeps a bad DB.
+puts, restores = [], []
+orig = (r.backend_name, r.storage_put, r.storage_verify,
+        r._gh_live_blob, r._gh_restore)
+r.backend_name = lambda: "github"
+r.storage_put = lambda key, f: puts.append(key)
+r.storage_verify = lambda key, f: False
+r._gh_live_blob = lambda key: "prevsha"
+r._gh_restore = lambda key, sha: restores.append((key, sha))
+try:
+    r.upload_db()
+    check("upload raises when verification keeps failing", False)
+except IOError:
+    check("upload raises when verification keeps failing", True)
+finally:
+    (r.backend_name, r.storage_put, r.storage_verify,
+     r._gh_live_blob, r._gh_restore) = orig
+check("failed verification retries the upload once",
+      puts == ["estama.db", "estama.db"])
+check("failed verification restores the previous live blob",
+      restores == [("estama.db", "prevsha")])
 
 holder = subprocess.Popen([sys.executable, "-c",
                            "import fcntl,time; f=open('/tmp/estama-runner-test/runner.lock','w');"

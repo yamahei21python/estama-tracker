@@ -35,6 +35,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
+import evidence as evidence_mod
 from common import (BASE_DIR as BASE, SCHEMA_PATH as SCHEMA,
                     SHOPS_JSON_PATH as DEFAULT_SHOPS, connect_db, load_json,
                     normalize_status_text, notify_webhook, now_jst)
@@ -272,6 +273,26 @@ def usually_sold_out_alert(conn, target_date, min_days=3, threshold=0.7):
                                round(n_sold / n, 2)))
     alerts.sort()
     return alerts, considered
+
+
+def alert_evidence_lines(conn, shop_name, cast_name, date, prefix="      ",
+                         review_db=None, bakusai_db=None, compact=False):
+    """Best-effort evidence lines for one alert.
+
+    Display only: a broken/missing review or bakusai DB must never
+    suppress or alter the alert itself, hence the blanket except."""
+    try:
+        row = conn.execute(
+            "SELECT shop_id FROM shops WHERE name = ?",
+            (shop_name,)).fetchone()
+        if not row:
+            return []
+        ev = evidence_mod.collect(
+            conn, row[0], shop_name, cast_name, date,
+            review_db=review_db, bakusai_db=bakusai_db)
+        return evidence_mod.format_lines(ev, prefix=prefix, compact=compact)
+    except Exception:
+        return []
 
 
 def rollup_daily(conn, date=None):
@@ -703,6 +724,220 @@ def section_forecast(conn, date, min_days=2, limit=20):
     return lines
 
 
+# ------------------------------------------------- 4h sell-out forecast ----
+# Discrete-time hazard: for each hour of the business day (06:00 -> 6,
+# 29:00 -> 29) the pooled chance that a still-bookable cast-day sells
+# out in that hour, estimated from snapshots before the target date.
+# The 4h probability is 1 - prod(1 - h) over the next four buckets,
+# weighted by the cast's own sold-out baseline (sqrt of its prior-day
+# rate). With too little history the probability is withheld and only
+# the baseline ranking is shown - never a number invented from n<3.
+
+FLIP_HOUR = 6
+SELLOUT_HORIZON_HOURS = 4
+DEEP_SHOPS_JSON = BASE / "deep_shops.json"
+
+
+def load_deep_shop_ids(path=DEEP_SHOPS_JSON):
+    """shop_ids from deep_shops.json (missing file -> empty set)."""
+    data = load_json(path, default=None)
+    if not data:
+        return set()
+    shops = data.get("shops", []) if isinstance(data, dict) else data
+    ids = set()
+    for s in shops:
+        if isinstance(s, dict) and s.get("shop_id") is not None:
+            ids.add(int(s["shop_id"]))
+        elif isinstance(s, int):
+            ids.add(s)
+    return ids
+
+
+def _bd_hour(hhmm):
+    """Clock 'HH:MM' -> business-day hour (06:00->6 ... 05:00->29)."""
+    if not hhmm:
+        return None
+    parts = str(hhmm).split(":")
+    if len(parts) != 2:
+        return None
+    try:
+        h, m = int(parts[0]), int(parts[1])
+    except ValueError:
+        return None
+    if not (0 <= h <= 29 and 0 <= m <= 59):
+        return None
+    if h < FLIP_HOUR:
+        h += 24
+    return h
+
+
+def pooled_sellout_hazard(conn, date):
+    """Pooled sell-out events / at-risk cast-days per business hour.
+
+    A cast-day is at risk in bucket b when it was observed somewhere
+    in [b, last observation] and had not sold out before b; the event
+    lands in the bucket where its first sold_out observation falls.
+    Returns (events: Counter, at_risk: Counter).
+    """
+    rows = conn.execute(
+        """SELECT shop_id, CAST(COALESCE(cast_id, cast_name) AS TEXT),
+                  target_date, fetched_time, status_norm
+           FROM snapshots WHERE target_date < ?""",
+        (date,)).fetchall()
+    days = {}
+    for sid, ck, d, ft, norm in rows:
+        b = _bd_hour(ft)
+        if b is None:
+            continue
+        rec = days.setdefault((sid, ck, d), {"min": b, "max": b, "so": None})
+        rec["min"] = min(rec["min"], b)
+        rec["max"] = max(rec["max"], b)
+        if norm == "sold_out" and (rec["so"] is None or b < rec["so"]):
+            rec["so"] = b
+    events, at_risk = Counter(), Counter()
+    for rec in days.values():
+        so = rec["so"]
+        for b in range(rec["min"], rec["max"] + 1):
+            if so is None or so >= b:
+                at_risk[b] += 1
+        if so is not None:
+            events[so] += 1
+    return events, at_risk
+
+
+def sellout_forecast(conn, date, at_hhmm=None,
+                     horizon=SELLOUT_HORIZON_HOURS, top=5,
+                     deep_shop_ids=None, min_obs=3, min_p=0.5):
+    """P(sold_out within `horizon` hours) for watch/deep candidates.
+
+    Candidates are today's available/low casts in cast_watch or in a
+    deep-tier shop. Each candidate carries the pool hazard prob, its
+    own baseline (sold-out days / observed days) and the observation
+    count n behind the probability. n<min_obs or no cast history ->
+    p is None and the cast goes to the baseline-only list.
+    """
+    if deep_shop_ids is None:
+        deep_shop_ids = load_deep_shop_ids()
+    try:
+        watch = {(r[0], r[1]) for r in conn.execute(
+            "SELECT shop_id, cast_key FROM cast_watch")}
+    except sqlite3.OperationalError:
+        watch = set()
+
+    hist = {}
+    for d in _all_dates(conn):
+        if d >= date:
+            continue
+        for r in _day_finals(conn, d):
+            h = hist.setdefault((r["shop_id"], _ckey(r)), [0, 0])
+            h[1] += 1
+            h[0] += r["status_norm"] == "sold_out"
+
+    now = now_jst()
+    anchor = None
+    if at_hhmm:
+        anchor = _bd_hour(at_hhmm)
+    elif date == _expected_business_date(now):
+        anchor = _bd_hour(now.strftime("%H:%M"))
+    if anchor is None:
+        times = [_bd_hour(t) for (t,) in conn.execute(
+            "SELECT DISTINCT fetched_time FROM snapshots WHERE target_date = ?",
+            (date,))]
+        times = [t for t in times if t is not None]
+        anchor = max(times) if times else 12
+
+    events, at_risk = pooled_sellout_hazard(conn, date)
+    tot_ev, tot_risk = sum(events.values()), sum(at_risk.values())
+    overall = min(tot_ev / tot_risk, 0.95) if tot_risk else 0.0
+    n_now = at_risk.get(anchor, 0)
+    p4 = 1.0
+    for b in range(anchor, min(anchor + horizon, 30)):
+        a, e = at_risk.get(b, 0), events.get(b, 0)
+        h = min(e / a, 0.95) if a >= min_obs else overall
+        p4 *= (1.0 - h)
+    p4 = 1.0 - p4
+
+    shop_names = {sid: name for sid, name in
+                  conn.execute("SELECT shop_id, name FROM shops")}
+    cands = []
+    for r in _day_finals(conn, date):
+        if r["status_norm"] not in ("available", "low"):
+            continue
+        key = (r["shop_id"], _ckey(r))
+        in_watch, in_deep = key in watch, r["shop_id"] in deep_shop_ids
+        if not (in_watch or in_deep):
+            continue
+        so, nd = hist.get(key, [0, 0])
+        rate = so / nd if nd else None
+        p = None
+        if nd and n_now >= min_obs:
+            p = round(p4 * (rate ** 0.5), 3)
+        cands.append({
+            "shop_id": r["shop_id"],
+            "shop": shop_names.get(r["shop_id"], str(r["shop_id"])),
+            "cast_key": key[1],
+            "cast_name": r["cast_name"],
+            "status_norm": r["status_norm"],
+            "status_raw": r["status_raw"],
+            "rate": rate,
+            "hist_days": nd,
+            "hist_sold": so,
+            "p": p,
+            "n": n_now,
+            "tier": "watch" if in_watch else "deep",
+        })
+    ranked = sorted([c for c in cands if c["p"] is not None],
+                    key=lambda c: (-c["p"], -(c["rate"] or 0)))
+    qualified = [c for c in ranked if c["p"] >= min_p][:top]
+    baseline_only = sorted([c for c in cands if c["p"] is None],
+                           key=lambda c: (-(c["rate"] or 0),
+                                          -c["hist_sold"], c["cast_name"]))
+    return {
+        "anchor_hour": anchor,
+        "horizon": horizon,
+        "n": n_now,
+        "pooled_hazard": round(p4, 3),
+        "overall_hazard": round(overall, 3),
+        "candidates": len(cands),
+        "qualified": qualified,
+        "baseline": baseline_only[:top],
+    }
+
+
+def section_sellout_forecast(conn, date, at_hhmm=None, horizon=4, top=5,
+                             deep_shop_ids=None):
+    """Report lines for the 4h sell-out forecast."""
+    fc = sellout_forecast(conn, date, at_hhmm=at_hhmm, horizon=horizon,
+                          top=top, deep_shop_ids=deep_shop_ids)
+    lines = [f"  起点 {fc['anchor_hour']}:00 / {fc['horizon']}時間以内"
+             f" / 対象cast {fc['candidates']}名"
+             f" / 同時刻の履歴観測 n={fc['n']}"
+             f" (pooled p={fc['pooled_hazard']:.0%},"
+             f" 全体hazard={fc['overall_hazard']:.0%})"]
+    if not fc["candidates"]:
+        lines.append("  対象なし（cast_watch 登録 or deep_shops.json の店舗が対象）")
+        return lines
+    if fc["qualified"]:
+        for c in fc["qualified"]:
+            lines.append(
+                f"  予測 {c['p']:.0%} {c['shop']} - {c['cast_name']}:"
+                f" [{c['status_raw']}] (完売率 {c['rate']:.0%}"
+                f" {c['hist_sold']}/{c['hist_days']}日, n={c['n']},"
+                f" {c['tier']})")
+    else:
+        lines.append(f"  確率 p>={0.5:.0%} の該当なし"
+                     + (f"（履歴観測 n={fc['n']}<3 のため確率は出さない）"
+                        if fc["n"] < 3 else ""))
+    if fc["baseline"]:
+        lines.append("  ベースライン順位（確率なし）:")
+        for c in fc["baseline"]:
+            rate = f"{c['rate']:.0%} {c['hist_sold']}/{c['hist_days']}日" \
+                if c["rate"] is not None else "履歴なし"
+            lines.append(f"    {c['shop']} - {c['cast_name']}:"
+                         f" [{c['status_raw']}] 完売率 {rate} ({c['tier']})")
+    return lines
+
+
 def section_rank_moves(conn, period_type="weekly", min_delta=5, limit=15):
     """Rank movement between the two latest ranking snapshots.
 
@@ -1092,8 +1327,171 @@ def section_runlog(conn, limit=8):
     return lines
 
 
+# ------------------------------------------------------------ monitoring ----
+# Daily operator checks, printed at the TOP of the report: a green
+# analysis over a broken scrape is worse than no analysis, so coverage
+# problems must be visible before any sold-out number.
+MONITOR_FAIL_MIN = 2        # fails before a shop is listed
+MONITOR_FAIL_RATE = 0.2     # ... or this share of its scrapes
+MONITOR_EMPTY_MIN = 2       # zero-row scrapes before a shop is listed
+MONITOR_SLOT_MIN_RATE = 0.5 # slot-capture share below which we warn
+CHECKPOINTS_PER_DAY = 24    # hourly checkpoints from 06:00
+
+
+def _bd_cond(col):
+    """scrape_log/run_log rows belonging to one BUSINESS day (flip 06:00).
+
+    Timestamps are JST strings ('YYYY-MM-DD HH:MM:SS JST'), so the
+    business date is the wall date shifted back six hours. Bound with a
+    date parameter - never interpolated."""
+    return ("date(datetime(substr(replace(" + col + ", ' JST', ''),"
+            " 1, 19), '-6 hours')) = ?")
+
+
+def _checkpoints_expected(date, now):
+    start = datetime.fromisoformat(date + "T06:00:00").replace(
+        tzinfo=now.tzinfo)
+    if now < start:
+        return 0
+    if date < _expected_business_date(now):
+        return CHECKPOINTS_PER_DAY
+    return min(CHECKPOINTS_PER_DAY,
+               int((now - start).total_seconds() // 3600) + 1)
+
+
+def monitor_report(conn, date, now=None):
+    """{'summary': str, 'warnings': [str]} for one business day.
+
+    Checkpoint counts come from run_log (the scheduler's view), shop
+    health from scrape_log (the scraper's view) and slot capture from
+    slot_events vs snapshots. Missing tables (old DBs, plain copies)
+    degrade to 'n/a' instead of failing the report."""
+    now = now or now_jst()
+    warnings = []
+    names = dict(conn.execute("SELECT shop_id, name FROM shops"))
+
+    ck = {}
+    total_ck = 0
+    try:
+        total_ck = conn.execute(
+            "SELECT COUNT(*) FROM run_log WHERE job = 'checkpoint'"
+        ).fetchone()[0]
+        ck = dict(conn.execute(
+            "SELECT status, COUNT(*) FROM run_log"
+            f" WHERE job = 'checkpoint' AND {_bd_cond('started_at')}"
+            " GROUP BY 1", (date,)).fetchall())
+    except sqlite3.OperationalError:
+        pass
+    expected = _checkpoints_expected(date, now)
+    ok = ck.get("ok", 0)
+    if total_ck == 0:
+        # snaps but no scheduler history: the DB was scraped by a runner
+        # that does not write run_log (or the table was lost). Counts
+        # would be a fabrication, so say what is actually known.
+        has_day = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM snapshots WHERE target_date = ?)",
+            (date,)).fetchone()[0]
+        if has_day:
+            warnings.append("run_log未記録: checkpoint実績が0件"
+                            "（runner未更新/未実行の疑い）")
+    elif expected and (expected - ok >= 2 or ck.get("fail")):
+        detail = f"ok {ok}/{expected}"
+        for st in ("fail", "skip"):
+            if ck.get(st):
+                detail += f", {st} {ck[st]}"
+        warnings.append(f"checkpoint未達: {detail}")
+
+    try:
+        stale = conn.execute(
+            "SELECT job, started_at FROM run_log WHERE status = 'running'"
+            " AND started_at < ?",
+            ((now - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S")
+             + " JST",)).fetchall()
+    except sqlite3.OperationalError:
+        stale = []
+    for job, st in stale:
+        warnings.append(f"runner滞留: {job} {st} (2時間超 running)")
+
+    scrapes = fails = 0
+    try:
+        rows = conn.execute(
+            "SELECT shop_id, SUM(status = 'fail'),"
+            f" SUM(status = 'empty'), COUNT(*) FROM scrape_log"
+            f" WHERE {_bd_cond('fetched_at')} GROUP BY 1",
+            (date,)).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    scrapes = sum(n for *_, n in rows)
+    fails = sum(f for _, f, _, _ in rows)
+    bad = [(s, f, n) for s, f, _, n in rows
+           if f >= max(MONITOR_FAIL_MIN, round(n * MONITOR_FAIL_RATE))]
+    if bad:
+        bad.sort(key=lambda x: -x[1] / x[2])
+        warnings.append("取得失敗の多い店: " + ", ".join(
+            f"{names.get(s, s)} {f}/{n}" for s, f, n in bad[:5]))
+    empty = [(s, e) for s, _, e, _ in rows if e >= MONITOR_EMPTY_MIN]
+    if empty:
+        empty.sort(key=lambda x: -x[1])
+        warnings.append("0行店: " + ", ".join(
+            f"{names.get(s, s)}({e}回)" for s, e in empty[:5]))
+
+    obs = cap = 0
+    try:
+        obs = conn.execute(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT shop_id,"
+            " CAST(COALESCE(cast_id, cast_name) AS TEXT) ck FROM snapshots"
+            " WHERE target_date = ?)", (date,)).fetchone()[0]
+        cap = conn.execute(
+            "SELECT COUNT(*) FROM (SELECT DISTINCT shop_id, cast_key"
+            " FROM slot_events WHERE target_date = ?)",
+            (date,)).fetchone()[0]
+        has_events = conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM slot_events)").fetchone()[0]
+    except sqlite3.OperationalError:
+        has_events = 0
+    slot_txt = "n/a"
+    if obs:
+        slot_txt = f"{cap}/{obs} cast ({cap / obs:.0%})"
+        if has_events and cap / obs < MONITOR_SLOT_MIN_RATE:
+            missing = conn.execute(
+                """SELECT shop_id, COUNT(DISTINCT CAST(COALESCE(cast_id,
+                       cast_name) AS TEXT)) FROM snapshots
+                   WHERE target_date = ?
+                     AND (shop_id, CAST(COALESCE(cast_id, cast_name)
+                          AS TEXT)) NOT IN
+                         (SELECT shop_id, cast_key FROM slot_events
+                          WHERE target_date = ?)
+                   GROUP BY 1 ORDER BY 2 DESC LIMIT 5""",
+                (date, date)).fetchall()
+            warnings.append(
+                f"枠イベント取得率が低い: {slot_txt}"
+                + (" 未取得: " + ", ".join(
+                    f"{names.get(s, s)}({n})" for s, n in missing)
+                   if missing else ""))
+        elif (not has_events
+              and date == _expected_business_date(now)):
+            warnings.append("枠イベントが1件も記録されていない（取得失敗の疑い）")
+
+    parts = [f"checkpoint ok {ok}/{expected}" if expected and total_ck
+             else "checkpoint n/a"]
+    if scrapes:
+        parts.append(f"取得fail {fails}/{scrapes}")
+    parts.append(f"枠イベント {slot_txt}")
+    if empty:
+        parts.append(f"0行店 {len(empty)}")
+    return {"summary": " / ".join(parts), "warnings": warnings}
+
+
+def section_monitor(conn, date, now=None):
+    """Render monitor_report: one summary line + '!' warning lines."""
+    rep = monitor_report(conn, date, now)
+    lines = ["  " + rep["summary"]]
+    lines += [f"  ! {w}" for w in rep["warnings"]]
+    return lines
+
+
 def print_report(conn, date=None, min_days=2, threshold=0.6,
-                 streak_min=2, top_n=15):
+                 streak_min=2, top_n=15, evidence=True):
     dates = _all_dates(conn)
     if not dates:
         print("report: snapshots が空です")
@@ -1105,6 +1503,9 @@ def print_report(conn, date=None, min_days=2, threshold=0.6,
         print(t)
         print("=" * 70)
 
+    head(f"【0】監視（{date}）")
+    for line in section_monitor(conn, date):
+        print(line)
     head("【1】日次サマリー（R3最終状態）")
     for line in section_daily(conn, dates):
         print(line)
@@ -1120,13 +1521,21 @@ def print_report(conn, date=None, min_days=2, threshold=0.6,
     low_cov = _low_coverage_shops(conn, date)
     name2sid = {n: s for s, n in
                 conn.execute("SELECT shop_id, name FROM shops")}
-    for shop, cast, norm, raw, n_sold, n, rate in alerts:
+    for i, (shop, cast, norm, raw, n_sold, n, rate) in enumerate(alerts):
         gap = "  <<巡回欠損:この店の今日の取得が少ない>>" \
             if name2sid.get(shop) in low_cov else ""
         print(f"  ALERT {shop} - {cast}: {norm} [{raw}] "
               f"(完売 {n_sold}/{n}日, {rate}){gap}")
+        if evidence and i < 5:
+            for line in alert_evidence_lines(conn, shop, cast, date):
+                print(line)
+    if evidence and len(alerts) > 5:
+        print(f"  (根拠は上位5件のみ表示; 他 {len(alerts) - 5}件省略)")
     head(f"【4】完売予兆（{date} 現在 low の注目cast）")
     for line in section_forecast(conn, date, min_days):
+        print(line)
+    head(f"【4c】4時間以内に完売する確率（{date}）")
+    for line in section_sellout_forecast(conn, date, top=5):
         print(line)
     head(f"【4b】予約の勢い（{date} 枠消化トップ）")
     for line in section_momentum(conn, date):
@@ -1224,8 +1633,26 @@ def build_notify_text(conn, date, min_days=2, threshold=0.6, limit=8):
     alerts, _ = usually_sold_out_alert(conn, date, min_days, threshold)
     if alerts:
         parts.append("■ 普段完売なのに空き:")
-        for shop, cast, norm, raw, n_sold, n, rate in alerts[:limit]:
+        for i, (shop, cast, norm, raw, n_sold, n, rate) in enumerate(
+                alerts[:limit]):
             parts.append(f"  {shop} - {cast} [{raw}] (完売率 {rate:.0%})")
+            if i < 3:
+                parts += alert_evidence_lines(conn, shop, cast, date,
+                                              prefix="    ", compact=True)
+    try:
+        fc = sellout_forecast(conn, date)
+    except Exception:
+        fc = None
+    if fc and fc["qualified"]:
+        parts.append("■ 4時間以内に完売しそう:")
+        for c in fc["qualified"]:
+            parts.append(
+                f"  p={c['p']:.0%} {c['shop']} - {c['cast_name']}"
+                f" (完売率 {c['rate']:.0%} {c['hist_sold']}/{c['hist_days']}日)")
+    elif fc and fc["baseline"]:
+        parts.append("■ 4時間以内に完売: 履歴不足のため確率なし"
+                     " / ベースライン上位: "
+                     + ", ".join(c["cast_name"] for c in fc["baseline"]))
     try:
         watch = conn.execute(
             """SELECT w.shop_id, w.cast_key, w.cast_name FROM cast_watch w
@@ -1553,6 +1980,22 @@ def main(argv=None):
                    type=int, default=3,
                    help="minimum distinct history DAYS (was: snapshot rows)")
     p.add_argument("--threshold", type=float, default=0.7)
+    p.add_argument("--no-evidence", action="store_true",
+                   help="omit review/bakusai/slot evidence lines")
+    p.add_argument("--review-db", default=None,
+                   help="review DB (default: "
+                        f"{evidence_mod.DEFAULT_REVIEW_DB})")
+    p.add_argument("--bakusai-db", default=None,
+                   help="bakusai DB (default: "
+                        f"{evidence_mod.DEFAULT_BAKUSAI_DB})")
+    p.add_argument("--db", default=str(BASE / "estama.db"))
+    p = sub.add_parser("sellout-forecast",
+                       help="P(sold out within N hours) for watch/deep casts")
+    p.add_argument("--date", help="business date (default: today)")
+    p.add_argument("--at", help="reference clock HH:MM (default: now)")
+    p.add_argument("--horizon", type=int, default=SELLOUT_HORIZON_HOURS)
+    p.add_argument("--top", type=int, default=5)
+    p.add_argument("--deep-shops", default=str(DEEP_SHOPS_JSON))
     p.add_argument("--db", default=str(BASE / "estama.db"))
     p = sub.add_parser("demo", help="in-memory alert-logic test")
     p = sub.add_parser("verify", help="print DB counts")
@@ -1571,6 +2014,13 @@ def main(argv=None):
                    help="minimum consecutive sold-out days to list")
     p.add_argument("--top", type=int, default=15,
                    help="rows shown in area/shop sections")
+    p.add_argument("--no-evidence", action="store_true",
+                   help="report: omit alert evidence lines")
+    p.add_argument("--db", default=str(BASE / "estama.db"))
+    p = sub.add_parser("monitor",
+                       help="coverage/health warnings for one business day"
+                            " (exit 1 when warnings exist)")
+    p.add_argument("--date", help="business date (default: latest snapshot)")
     p.add_argument("--db", default=str(BASE / "estama.db"))
     p = sub.add_parser("watch", help="favorite casts: add/remove/list")
     p.add_argument("action", choices=("add", "remove", "list"))
@@ -1650,6 +2100,12 @@ def main(argv=None):
         for shop, cast, norm, raw, n_sold, n, rate in alerts:
             print(f"ALERT {shop} - {cast}: {norm} [{raw}] "
                   f"(sold out {n_sold}/{n} prior days, rate {rate})")
+            if not args.no_evidence:
+                for line in alert_evidence_lines(
+                        conn, shop, cast, args.date,
+                        review_db=args.review_db,
+                        bakusai_db=args.bakusai_db):
+                    print(line)
         return 0
     if args.cmd == "verify":
         print_verify(conn)
@@ -1659,10 +2115,31 @@ def main(argv=None):
         print(f"rollup: daily_cast_status {n} rows"
               + (f" (date {args.date})" if args.date else ""))
         return 0
+    if args.cmd == "sellout-forecast":
+        date = args.date or _expected_business_date(now_jst())
+        deep = load_deep_shop_ids(args.deep_shops)
+        for line in section_sellout_forecast(
+                conn, date, at_hhmm=args.at, horizon=args.horizon,
+                top=args.top, deep_shop_ids=deep):
+            print(line)
+        return 0
     if args.cmd == "report":
         print_report(conn, args.date, args.min_days, args.threshold,
-                     args.streak_min, args.top)
+                     args.streak_min, args.top,
+                     evidence=not args.no_evidence)
         return 0
+    if args.cmd == "monitor":
+        date = args.date or (_all_dates(conn) or [None])[-1]
+        if not date:
+            print("monitor: snapshots が空です")
+            return 0
+        rep = monitor_report(conn, date)
+        print("  " + rep["summary"])
+        for w in rep["warnings"]:
+            print(f"  ! {w}")
+        if not rep["warnings"]:
+            print("  異常なし")
+        return 1 if rep["warnings"] else 0
     if args.cmd == "watch":
         if args.action == "list":
             rows = conn.execute(

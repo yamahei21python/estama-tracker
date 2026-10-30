@@ -2,6 +2,8 @@
 
 大阪のメンズエステ（estama.jp）で「普段は完売しているのに、今日は空いているキャスト」を拾うための完売追跡システム。出勤表を1時間おきに巡回して SQLite に蓄積し、完売の履歴と速度を分析する。
 
+VM での運用手順は [RUNBOOK.md](RUNBOOK.md) にまとめてある。
+
 ## 構成
 
 | ファイル | 役割 |
@@ -13,6 +15,10 @@
 | `app/schema.sql` | DBスキーマ（shops / snapshots / cast_rankings / daily_cast_status / run_log） |
 | `app/shops.json` | ウォッチリスト（巡回対象の店） |
 | `app/banned_shops.json` | 出禁リスト（実行時に生成。git対象外） |
+| `app/bakusai.py` | 爆サイ.com のスレッド発見・本文取得。専用 DB `bakusai.db`（git対象外、VMローカル） |
+| `app/deep_shops.json` | deep tier（爆サイでスレッドが確認できた店だけの固定リスト。口コミ順位で埋めない） |
+| `app/evidence.py` | alert の根拠表示（口コミ・爆サイ・枠消失・出典URL。表示専用で判定には使わない） |
+| `app/RUNBOOK.md` | VM 運用手順書（1コマンド運用・デプロイ後の確認手順） |
 | `runner.py` | 運用ランナー。下記の安全装置と R2 アップロードを担当 |
 
 ## 運用フロー
@@ -85,6 +91,30 @@ export ESTAMA_NOTIFY_WEBHOOK=https://discord.com/api/webhooks/...   # Slack/Disc
 ./venv/bin/python app/estama_tracker.py cast --shop-id 25081 --cast-id 362395
 ```
 
+## 予約判断の改善（slot_events / 予測 / 根拠 / 爆サイ / 監視）
+
+```bash
+# 枠イベントは取り込み時に自動記録（snapshots は不変）。再計算は rollup のまま
+./venv/bin/python app/estama_tracker.py rollup
+
+# 4時間以内に完売する確率（watch/deep 対象・n>=3・p>=0.5・上位5件）
+# 履歴不足なら確率を出さずベースライン順位のみ
+./venv/bin/python app/estama_tracker.py sellout-forecast --deep-shops app/deep_shops.json
+
+# 監視レポート（店別fail率・0行店・checkpoint欠損・枠イベント取得率を冒頭に警告、exit 1）
+./venv/bin/python app/estama_tracker.py monitor --db app/estama.db
+
+# 爆サイ（別DB bakusai.db）。deep tier はスレッドが確認できた店だけの固定JSON
+./venv/bin/python app/bakusai.py init
+./venv/bin/python app/bakusai.py discover --deep-out app/deep_shops.json
+./venv/bin/python app/bakusai.py crawl --deep app/deep_shops.json --limit 2 --max-pages 1
+./venv/bin/python app/bakusai.py status
+```
+
+- 枠イベント: 30分枠の状態変化（○→×/─/TEL、戻り含む）だけを `slot_events` に1行。`slot_time` は表記と分（`27:00`=1620）を併記
+- 爆サイ: 本文は先頭500字・投稿番号/時刻/アンカーID保存・アンカー連鎖は最大10ホップ・伏せ字は候補保存のみ。スレッドと店は多対多、alert帰属は「タイトル主店舗」＋「本文の完全名一致」だけ
+- 根拠表示は表示専用。完売判定・予測の計算には一切使わない
+
 ## テスト
 
 ```bash
@@ -94,6 +124,12 @@ python3 tests/test_speed_rank.py      # 完売スピードの日跨ぎ順序（f
 python3 tests/test_runner.py          # ロック・検証・アーカイブ・アップロード・run_log
 python3 tests/test_rollup.py          # daily_cast_status ロールアップとレポート節
 python3 tests/test_prune.py           # 出禁ルール
+python3 tests/test_slot_events.py     # 枠パース・イベント重複排除
+python3 tests/test_hazard.py          # 時間帯別 hazard・ベースライン
+python3 tests/test_evidence.py        # 根拠表示（口コミ/爆サイ/枠消失/出典）
+python3 tests/test_bakusai.py         # 爆サイ（発見・紐付け信頼度・検索フォールバック・crawl）
+python3 tests/test_monitor.py         # 監視の警告条件
+python3 tests/test_gh_storage.py      # data ブランチ保存の blob 検証・復元
 ./venv/bin/python tests/test_normalize.py  # ステータス正規化の真理表
 ./venv/bin/python app/estama_tracker.py demo
 ```

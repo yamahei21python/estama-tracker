@@ -143,6 +143,32 @@ CREATE TABLE IF NOT EXISTS forecast_eval (
     evaluated_at TEXT NOT NULL
 );
 
+-- 30-minute slot state changes (○ → × / ─ / TEL and reversals).
+-- Recorded by import_into_db for TODAY only; snapshots stay untouched.
+-- One row per observed transition (or first sighting, from_mark NULL).
+-- slot_time keeps the site label ("27:00") and slot_minutes its
+-- parsed day-offset value (1620) so late-night slots sort correctly.
+CREATE TABLE IF NOT EXISTS slot_events (
+    event_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    shop_id      INTEGER NOT NULL REFERENCES shops (shop_id),
+    cast_key     TEXT NOT NULL,     -- CAST(COALESCE(cast_id, cast_name) AS TEXT)
+    cast_id      INTEGER,
+    cast_name    TEXT NOT NULL,
+    target_date  TEXT NOT NULL,
+    slot_time    TEXT NOT NULL,     -- e.g. "18:30", "27:00"
+    slot_minutes INTEGER NOT NULL,  -- e.g. 1110, 1620
+    from_mark    TEXT,              -- NULL on the first sighting
+    to_mark      TEXT NOT NULL,     -- ○ | × | ─ | TEL
+    observed_at  TEXT NOT NULL,     -- snapshot fetched_at (JST string)
+    checkpoint   TEXT NOT NULL,     -- e.g. "17:30"
+    UNIQUE (shop_id, cast_key, target_date, slot_time, observed_at)
+);
+
+CREATE INDEX IF NOT EXISTS idx_slot_events_lookup
+    ON slot_events (shop_id, cast_key, target_date, slot_time, observed_at);
+CREATE INDEX IF NOT EXISTS idx_slot_events_date
+    ON slot_events (target_date, slot_minutes);
+
 -- User-managed favorite casts: 'watch add/remove/list' CLI writes
 -- here so the list survives through the DB itself (the data branch
 -- carries the DB, so favorites follow it like everything else).

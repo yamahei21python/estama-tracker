@@ -37,7 +37,7 @@ except ImportError:
 from common import (BASE_DIR, DB_PATH as DEFAULT_DB, SCHEMA_PATH,
                     SHOPS_JSON_PATH as DEFAULT_SHOPS_JSON, connect_db,
                     load_json, log_scrape, make_session,
-                    normalize_status_text, now_jst, save_json)
+                    normalize_status_text, now_jst, parse_clock, save_json)
 
 DEFAULT_SHOP_ID = 40900  # 梅田高級メンズエステ SUPER AKUMA GIRLS
 
@@ -100,6 +100,101 @@ def parse_shift_details(shift_str, slots=None):
             return start_s, end_s, work_mins, work_hours
 
     return None, None, None, None
+
+
+def normalize_slot_mark(mark):
+    """Canonical 30-min slot mark: ○ | × | ─ | TEL, otherwise None.
+
+    The site mixes full/half-width variants; blank cells, headers and
+    anything unrecognised are dropped so slot_events only holds real
+    state.
+    """
+    if mark is None:
+        return None
+    m = str(mark).strip()
+    if not m:
+        return None
+    if m in ("○", "◯", "〇"):
+        return "○"
+    if m in ("×", "✕", "✖", "✗", "x", "X"):
+        return "×"
+    if m in ("─", "－", "-", "ー", "—", "―", "‐"):
+        return "─"
+    if m.upper() == "TEL":
+        return "TEL"
+    return None
+
+
+def _slot_within_shift(slot_minutes, shift_start, shift_end):
+    """True/False when the shift bounds are known, None when they aren't.
+
+    Late-night slots and shifts are compared on the same day offset
+    (27:00 slot vs. 19:00～翌5:00 shift -> 1620 vs. 1140..1740).
+    """
+    start = parse_clock(shift_start)
+    end = parse_clock(shift_end)
+    if start is None or end is None:
+        return None
+    if end <= start:
+        end += 1440
+    m = slot_minutes
+    if m < start:
+        m += 1440
+    return start <= m < end
+
+
+def record_slot_events(conn, shop_id, cast, target_date, fetched_at,
+                       fetched_time):
+    """Append 30-min state transitions for one cast to slot_events.
+
+    Only differences are stored (the first sighting has from_mark
+    NULL), so re-importing the same checkpoint inserts nothing.
+    Off-shift '─' cells are the site's filler, not a state change, and
+    are skipped. Returns the number of rows inserted.
+    """
+    slots = cast.get("slots") or []
+    if not slots:
+        return 0
+    cast_id = cast.get("cast_id")
+    cast_key = str(cast_id) if cast_id is not None else cast["cast_name"]
+    inserted = 0
+    for slot_time, raw_mark in slots:
+        mark = normalize_slot_mark(raw_mark)
+        if mark is None:
+            continue
+        minutes = parse_clock(slot_time)
+        if minutes is None:
+            continue
+        prior = conn.execute(
+            """SELECT to_mark, observed_at FROM slot_events
+               WHERE shop_id = ? AND cast_key = ? AND target_date = ?
+                 AND slot_time = ?
+               ORDER BY observed_at DESC, event_id DESC LIMIT 1""",
+            (shop_id, cast_key, target_date, slot_time)).fetchone()
+        if mark == "─":
+            inside = _slot_within_shift(
+                minutes, cast.get("shift_start"), cast.get("shift_end"))
+            if inside is False:
+                continue
+            if inside is None and prior is None:
+                continue  # unknown shift: don't seed filler dashes
+        if prior is not None:
+            prior_mark, prior_obs = prior
+            if prior_obs > fetched_at:
+                continue  # late replay of an older checkpoint
+            if prior_mark == mark:
+                continue
+        conn.execute(
+            """INSERT OR IGNORE INTO slot_events (
+                   shop_id, cast_key, cast_id, cast_name, target_date,
+                   slot_time, slot_minutes, from_mark, to_mark,
+                   observed_at, checkpoint)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (shop_id, cast_key, cast_id, cast["cast_name"], target_date,
+             slot_time, minutes, prior[0] if prior else None, mark,
+             fetched_at, fetched_time))
+        inserted += 1
+    return inserted
 
 
 class EstamaScraper:
@@ -404,6 +499,7 @@ class EstamaScraper:
                 "status_raw": status_raw,
                 "status_norm": norm,
                 "slot_pattern": slot_pattern,
+                "slots": [list(s) for s in col["slots"]],
                 "slots_summary": {
                     "open_circles": circles,
                     "reserved_crosses": crosses,
@@ -639,6 +735,11 @@ def import_into_db(data, db_path=DEFAULT_DB):
                 )
             )
             total_inserted += 1
+            # Future days only carry templated slot grids, so their
+            # "changes" are noise; slot history is today-only.
+            if day_info.get("days_offset") == 0:
+                record_slot_events(conn, shop["shop_id"], c, target_date,
+                                   data["fetched_at"], fetched_time)
 
     conn.commit()
     conn.close()

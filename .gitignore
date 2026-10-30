@@ -12,3 +12,5 @@ snapshot_*.json
 ranking_weekly_*.json
 *.bak-*
 venv/
+# local CLI permissions (machine-specific)
+.qoder/

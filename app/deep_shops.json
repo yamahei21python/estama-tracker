@@ -1,0 +1,247 @@
+{
+  "generated_at": "2026-10-30 08:58:56",
+  "source": "bakusai discovery (latest-30 + area search)",
+  "note": "スレッドが確認できた店のみ。口コミ順位などで埋めない。",
+  "shops": [
+    {
+      "shop_id": 25081,
+      "name": "ミセス美オーラ",
+      "threads": 30,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 27359,
+      "name": "ぽっちゃりエステ　つつみ",
+      "threads": 18,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 34532,
+      "name": "古都 別邸",
+      "threads": 13,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 29309,
+      "name": "みるくSPA",
+      "threads": 12,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 41349,
+      "name": "belle femme（ベルファーム）　マット型コンセプト",
+      "threads": 11,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 31981,
+      "name": "SARISARI(サリサリ)",
+      "threads": 11,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 35407,
+      "name": "アットスパ茨木",
+      "threads": 8,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 34895,
+      "name": "鏡花水月",
+      "threads": 6,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 48384,
+      "name": "アクアマリン",
+      "threads": 5,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 42956,
+      "name": "kitty",
+      "threads": 4,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 38188,
+      "name": "sirena~シレーナ~",
+      "threads": 4,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 33881,
+      "name": "Mrs.C'est la vie（ミセス セラヴィ）",
+      "threads": 4,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 30813,
+      "name": "kitty(キティ)",
+      "threads": 4,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 29289,
+      "name": "俺の家",
+      "threads": 4,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 48033,
+      "name": "煌めきSPA（キラメキスパ）",
+      "threads": 3,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 38134,
+      "name": "Femme Fatale（ファムファタール）",
+      "threads": 3,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 32077,
+      "name": "TAKETONBO江坂",
+      "threads": 3,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 31933,
+      "name": "Queen Spumante ークイーンスプマンテー",
+      "threads": 3,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 27763,
+      "name": "クラウンマーメイド",
+      "threads": 3,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 43664,
+      "name": "QueenSpumante 長堀橋店",
+      "threads": 2,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 43485,
+      "name": "帝SPA",
+      "threads": 2,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 42020,
+      "name": "Guy Osaka",
+      "threads": 2,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 39981,
+      "name": "SPAすぷらっしゅ",
+      "threads": 2,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 33975,
+      "name": "帝SPA (ミカドスパ)",
+      "threads": 2,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 27217,
+      "name": "Darlin Premium(ダーリンプレミアム)",
+      "threads": 2,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 51184,
+      "name": "ワールドスパ",
+      "threads": 1,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 50797,
+      "name": "VELIA（ヴェリア）",
+      "threads": 1,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 49499,
+      "name": "メンズエステ《新時代》",
+      "threads": 1,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 48495,
+      "name": "LUXEAZ -ルクシーズ- 難波店",
+      "threads": 1,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 47573,
+      "name": "Melty Room -メルティールーム- 難波店",
+      "threads": 1,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 43797,
+      "name": "AMATERAS　新大阪・西中島ルーム",
+      "threads": 1,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 43728,
+      "name": "絶対肌感38.5℃【心斎橋ルーム＆出張無料】",
+      "threads": 1,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 43646,
+      "name": "皇SPA",
+      "threads": 1,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 43054,
+      "name": "Super (シューペル)マット型コンセプト",
+      "threads": 1,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 42071,
+      "name": "Flower",
+      "threads": 1,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 41399,
+      "name": "Pinky ring （ピンキーリング）日本橋店",
+      "threads": 1,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 40385,
+      "name": "イチャSPA",
+      "threads": 1,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 39174,
+      "name": "SKB8000",
+      "threads": 1,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 34724,
+      "name": "SPA シルビア",
+      "threads": 1,
+      "confidence": 0.8
+    },
+    {
+      "shop_id": 32122,
+      "name": "SPA：Chill（スパチル）",
+      "threads": 1,
+      "confidence": 0.8
+    }
+  ]
+}

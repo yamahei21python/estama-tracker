@@ -57,7 +57,6 @@ LOCAL_MIRROR = BASE / "r2_local"
 STAGING_DIR = BASE / "staging"
 
 LIVE_KEY = "estama.db"
-STAGING_KEY = "estama.db.staging"
 BUSINESS_DAY_FLIP_HOUR = 6  # site business date flips ~05:00-06:00; use 06:00
 
 
@@ -127,7 +126,7 @@ GH_CRED_LIB = "/opt/muse/skills/custom-connector-setup/bin"
 
 
 def gh_path(key: str) -> str:
-    if key.endswith(".db") or key.endswith(".db.staging"):
+    if key.endswith(".db"):
         return key + ".gz"
     return key
 
@@ -216,13 +215,20 @@ def _gh_verify(key: str, local_file: Path) -> bool:
     return bool(entry) and entry["sha"] == gh_blob_sha(gh_payload(local_file, key))
 
 
-def _gh_copy(src_key: str, dst_key: str) -> None:
-    entries = _gh_entries()
-    src = entries.get(gh_path(src_key))
-    if not src:
-        raise IOError(f"github copy source missing: {src_key}")
-    _gh_commit([{"path": gh_path(dst_key), "mode": "100644", "type": "blob",
-                 "sha": src["sha"]}], f"data: copy {src_key} -> {dst_key}")
+def _gh_live_blob(key: str) -> str | None:
+    """Blob SHA currently stored at key (None when missing/unreachable)."""
+    try:
+        entry = _gh_entries().get(gh_path(key))
+    except Exception:
+        return None
+    return entry["sha"] if entry else None
+
+
+def _gh_restore(key: str, blob_sha: str) -> None:
+    """Point key back at a previously verified blob in one commit."""
+    _gh_commit([{"path": gh_path(key), "mode": "100644", "type": "blob",
+                 "sha": blob_sha}],
+               f"data: restore {key} (post-write verify failed)")
 
 
 def _gh_delete(key: str) -> None:
@@ -269,19 +275,6 @@ def storage_verify(key: str, local_file: Path) -> bool:
         except Exception:
             return False
     return storage_size(key) == local_file.stat().st_size
-
-
-def storage_copy(src_key: str, dst_key: str) -> None:
-    b = backend_name()
-    if b == "github":
-        _gh_copy(src_key, dst_key)
-    elif b == "R2":
-        bucket = os.environ["ESTAMA_R2_BUCKET"]
-        _s3().copy_object(Bucket=bucket, CopySource={"Bucket": bucket, "Key": src_key}, Key=dst_key)
-    else:
-        src, dst = LOCAL_MIRROR / src_key, LOCAL_MIRROR / dst_key
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dst)
 
 
 def storage_delete(key: str) -> None:
@@ -351,21 +344,33 @@ def snapshot_count(path: Path) -> int:
 # ---------------------------------------------------------------- upload ----
 
 def upload_db() -> dict:
-    """Verify -> snapshot -> staged upload -> size check -> promote."""
+    """Verify -> snapshot -> one direct live write -> verify -> restore.
+
+    The DB goes straight to LIVE_KEY as a single data-branch commit.
+    (The old staging -> promote -> delete dance cost three commits per
+    checkpoint.) The written blob is verified against the locally
+    verified snapshot; only a mismatch re-uploads it once, and if that
+    also fails the previous live blob is restored so the branch never
+    keeps a corrupt DB.
+    """
     stats = verify_db(DB)
     STAGING_DIR.mkdir(parents=True, exist_ok=True)
     snap = STAGING_DIR / f"estama-{now_jst():%Y%m%d-%H%M%S}.db"
     snapshot_copy(DB, snap)
     verify_db(snap)  # the copy itself must be intact before it can go live
     size = snap.stat().st_size
-    storage_put(STAGING_KEY, snap)
-    if not storage_verify(STAGING_KEY, snap):
-        raise IOError("staged upload verification failed")
-    storage_copy(STAGING_KEY, LIVE_KEY)
-    if not storage_verify(LIVE_KEY, snap):
-        raise IOError("promoted object verification failed")
-    storage_delete(STAGING_KEY)
-    snap.unlink(missing_ok=True)
+    prev_blob = _gh_live_blob(LIVE_KEY) if backend_name() == "github" else None
+    try:
+        storage_put(LIVE_KEY, snap)
+        if not storage_verify(LIVE_KEY, snap):
+            storage_put(LIVE_KEY, snap)  # retry once from the good copy
+        if not storage_verify(LIVE_KEY, snap):
+            if prev_blob:
+                _gh_restore(LIVE_KEY, prev_blob)
+                log(f"upload: verified live write failed, restored {LIVE_KEY}")
+            raise IOError("live object verification failed after restore")
+    finally:
+        snap.unlink(missing_ok=True)
     log(f"upload ok: {LIVE_KEY} {size} bytes, stats={stats}, backend={backend_name()}")
     return stats
 

@@ -27,7 +27,6 @@ def check(name, cond):
 
 # key -> stored path mapping
 check("live db gzipped", r.gh_path("estama.db") == "estama.db.gz")
-check("staging db gzipped", r.gh_path("estama.db.staging") == "estama.db.staging.gz")
 check("archive db gzipped",
       r.gh_path("archive/estama-2026-10-26.db") == "archive/estama-2026-10-26.db.gz")
 check("shops.json untouched", r.gh_path("shops.json") == "shops.json")
