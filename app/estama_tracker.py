@@ -132,7 +132,7 @@ def load_watchlist(shops_path):
 
 
 def load_snapshot(conn, snapshot_path, watchlist_ids=None):
-    """Insert a snapshot JSON file. Idempotent for same date/shop/cast.
+    """Insert a snapshot JSON file. Idempotent for the same checkpoint.
 
     Returns a dict of load statistics. Shops not in the watchlist (when
     a non-empty watchlist is given) are skipped and counted.
@@ -140,6 +140,10 @@ def load_snapshot(conn, snapshot_path, watchlist_ids=None):
     data = json.loads(Path(snapshot_path).read_text(encoding="utf-8"))
     date = data["snapshot_date"]
     fetched = data.get("collected_jst", "")
+    # fetched_time is part of the snapshots unique key; leaving it NULL
+    # would make re-loads duplicate rows (SQLite treats NULLs as distinct).
+    fetched_time = data.get("fetched_time") or (
+        fetched[11:16] if len(fetched) >= 16 else "")
     stats = {
         "date": date,
         "shops_seen": 0,
@@ -174,12 +178,13 @@ def load_snapshot(conn, snapshot_path, watchlist_ids=None):
             cur = conn.execute(
                 """INSERT OR IGNORE INTO snapshots
                    (shop_id, cast_name, cast_id, age, shift, status_raw,
-                    status_norm, slot_pattern, target_date, fetched_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    status_norm, slot_pattern, target_date, fetched_at,
+                    fetched_time)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (shop_id, cast["cast_name"], cast.get("cast_id"),
                  cast.get("age"), cast.get("shift"), raw,
                  normalize_status(raw), cast.get("slot_pattern"),
-                 date, fetched),
+                 date, fetched, fetched_time),
             )
             # rowcount is 1 only when a new row was actually inserted;
             # 0 on a re-run for the same date/shop/cast (idempotent).
@@ -434,10 +439,11 @@ def section_daily(conn, dates):
 
 
 def section_streaks(conn, dates, streak_min=2):
-    """Casts with >= streak_min consecutive sold-out days (latest first).
+    """Casts sold out on >= streak_min consecutive days up to the newest.
 
-    The streak ends at the newest date; casts absent from the newest
-    date still show their run with today's state '-'.
+    The streak must include the newest date; a cast that was sold out
+    earlier but absent or different today is not listed (its run has
+    ended as far as the newest day is concerned).
     """
     by_cast = {}
     names = {}
@@ -494,7 +500,7 @@ def section_timing(conn, dates):
            GROUP BY 1, 3, 4""").fetchall()
     by_cast = {}
     for sid, name, k, d, fa in per_cast:
-        by_cast.setdefault((sid, name, k), {})[d] = fa[11:13]
+        by_cast.setdefault((sid, name, k), {})[d] = fa[11:13] if fa else "-"
     names = {s: n for s, n in
              conn.execute("SELECT shop_id, name FROM shops")}
     regulars = sorted(
@@ -911,9 +917,12 @@ def section_sellout_forecast(conn, date, at_hhmm=None, horizon=4, top=5,
                           top=top, deep_shop_ids=deep_shop_ids)
     lines = [f"  起点 {fc['anchor_hour']}:00 / {fc['horizon']}時間以内"
              f" / 対象cast {fc['candidates']}名"
-             f" / 同時刻の履歴観測 n={fc['n']}"
-             f" (pooled p={fc['pooled_hazard']:.0%},"
-             f" 全体hazard={fc['overall_hazard']:.0%})"]
+             f" / 同時刻の履歴観測 n={fc['n']}"]
+    if fc["n"] >= 3:
+        lines[0] += (f" (pooled p={fc['pooled_hazard']:.0%},"
+                     f" 全体hazard={fc['overall_hazard']:.0%})")
+    else:
+        lines[0] += " (n<3: 確率は出さない)"
     if not fc["candidates"]:
         lines.append("  対象なし（cast_watch 登録 or deep_shops.json の店舗が対象）")
         return lines
@@ -1369,6 +1378,9 @@ def monitor_report(conn, date, now=None):
     now = now or now_jst()
     warnings = []
     names = dict(conn.execute("SELECT shop_id, name FROM shops"))
+    has_day = conn.execute(
+        "SELECT EXISTS(SELECT 1 FROM snapshots WHERE target_date = ?)",
+        (date,)).fetchone()[0]
 
     ck = {}
     total_ck = 0
@@ -1388,9 +1400,6 @@ def monitor_report(conn, date, now=None):
         # snaps but no scheduler history: the DB was scraped by a runner
         # that does not write run_log (or the table was lost). Counts
         # would be a fabrication, so say what is actually known.
-        has_day = conn.execute(
-            "SELECT EXISTS(SELECT 1 FROM snapshots WHERE target_date = ?)",
-            (date,)).fetchone()[0]
         if has_day:
             warnings.append("run_log未記録: checkpoint実績が0件"
                             "（runner未更新/未実行の疑い）")
@@ -1400,6 +1409,8 @@ def monitor_report(conn, date, now=None):
             if ck.get(st):
                 detail += f", {st} {ck[st]}"
         warnings.append(f"checkpoint未達: {detail}")
+    if date == _expected_business_date(now) and not has_day:
+        warnings.append("本日分のsnapshotsが0行（巡回失敗の疑い）")
 
     try:
         stale = conn.execute(
@@ -1534,11 +1545,11 @@ def print_report(conn, date=None, min_days=2, threshold=0.6,
     head(f"【4】完売予兆（{date} 現在 low の注目cast）")
     for line in section_forecast(conn, date, min_days):
         print(line)
-    head(f"【4c】4時間以内に完売する確率（{date}）")
-    for line in section_sellout_forecast(conn, date, top=5):
-        print(line)
     head(f"【4b】予約の勢い（{date} 枠消化トップ）")
     for line in section_momentum(conn, date):
+        print(line)
+    head(f"【4c】4時間以内に完売する確率（{date}）")
+    for line in section_sellout_forecast(conn, date, top=5):
         print(line)
     head("【5】完売の初観測タイミング")
     for line in section_timing(conn, dates):
@@ -1959,6 +1970,18 @@ def print_verify(conn):
         print("  (no snapshot rows loaded yet)")
 
 
+def _date_arg(value):
+    """argparse type: business dates are strict YYYY-MM-DD strings.
+
+    datetime.fromisoformat would also accept a datetime, which would
+    never equal a target_date and report an empty (misleading) day."""
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"invalid date {value!r} (expected YYYY-MM-DD)")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="estama-tracker")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1969,13 +1992,13 @@ def main(argv=None):
     p.add_argument("--shops", default=str(DEFAULT_SHOPS))
     p.add_argument("--db", default=str(BASE / "estama.db"))
     p = sub.add_parser("sold-out", help="today's sold-out list")
-    p.add_argument("--date", required=True)
+    p.add_argument("--date", required=True, type=_date_arg)
     p.add_argument("--db", default=str(BASE / "estama.db"))
     p = sub.add_parser("counts", help="status counts for a date")
-    p.add_argument("--date", required=True)
+    p.add_argument("--date", required=True, type=_date_arg)
     p.add_argument("--db", default=str(BASE / "estama.db"))
     p = sub.add_parser("alert", help="usually-sold-out but available/low")
-    p.add_argument("--date", required=True)
+    p.add_argument("--date", required=True, type=_date_arg)
     p.add_argument("--min-days", "--min-snapshots", dest="min_days",
                    type=int, default=3,
                    help="minimum distinct history DAYS (was: snapshot rows)")
@@ -1991,7 +2014,8 @@ def main(argv=None):
     p.add_argument("--db", default=str(BASE / "estama.db"))
     p = sub.add_parser("sellout-forecast",
                        help="P(sold out within N hours) for watch/deep casts")
-    p.add_argument("--date", help="business date (default: today)")
+    p.add_argument("--date", type=_date_arg,
+                   help="business date (default: today)")
     p.add_argument("--at", help="reference clock HH:MM (default: now)")
     p.add_argument("--horizon", type=int, default=SELLOUT_HORIZON_HOURS)
     p.add_argument("--top", type=int, default=5)
@@ -2001,11 +2025,13 @@ def main(argv=None):
     p = sub.add_parser("verify", help="print DB counts")
     p.add_argument("--db", default=str(BASE / "estama.db"))
     p = sub.add_parser("rollup", help="rebuild daily_cast_status from snapshots")
-    p.add_argument("--date", help="one business date (default: all)")
+    p.add_argument("--date", type=_date_arg,
+                   help="one business date (default: all)")
     p.add_argument("--db", default=str(BASE / "estama.db"))
     p = sub.add_parser("report", help="full analysis report")
-    p.add_argument("--date", help="focus date for area/shop/ranking sections "
-                                 "(default: latest target_date)")
+    p.add_argument("--date", type=_date_arg,
+                   help="focus date for area/shop/ranking sections "
+                        "(default: latest target_date)")
     p.add_argument("--min-days", type=int, default=2,
                    help="alert: minimum prior observed days")
     p.add_argument("--threshold", type=float, default=0.6,
@@ -2020,7 +2046,8 @@ def main(argv=None):
     p = sub.add_parser("monitor",
                        help="coverage/health warnings for one business day"
                             " (exit 1 when warnings exist)")
-    p.add_argument("--date", help="business date (default: latest snapshot)")
+    p.add_argument("--date", type=_date_arg,
+                   help="business date (default: today's business date)")
     p.add_argument("--db", default=str(BASE / "estama.db"))
     p = sub.add_parser("watch", help="favorite casts: add/remove/list")
     p.add_argument("action", choices=("add", "remove", "list"))
@@ -2032,13 +2059,15 @@ def main(argv=None):
     p = sub.add_parser("notify",
                        help="POST alert/forecast summary to the "
                             "ESTAMA_NOTIFY_WEBHOOK webhook")
-    p.add_argument("--date", help="business date (default: latest)")
+    p.add_argument("--date", type=_date_arg,
+                   help="business date (default: latest)")
     p.add_argument("--min-days", type=int, default=2)
     p.add_argument("--threshold", type=float, default=0.6)
     p.add_argument("--db", default=str(BASE / "estama.db"))
     p = sub.add_parser("dashboard",
                        help="write a self-contained HTML dashboard")
-    p.add_argument("--date", help="business date (default: latest)")
+    p.add_argument("--date", type=_date_arg,
+                   help="business date (default: latest)")
     p.add_argument("--out", default=str(BASE / "dashboard.html"))
     p.add_argument("--db", default=str(BASE / "estama.db"))
     p = sub.add_parser("cast",
@@ -2129,10 +2158,11 @@ def main(argv=None):
                      evidence=not args.no_evidence)
         return 0
     if args.cmd == "monitor":
-        date = args.date or (_all_dates(conn) or [None])[-1]
-        if not date:
+        dates = _all_dates(conn)
+        if not dates:
             print("monitor: snapshots が空です")
             return 0
+        date = args.date or _expected_business_date(now_jst())
         rep = monitor_report(conn, date)
         print("  " + rep["summary"])
         for w in rep["warnings"]:

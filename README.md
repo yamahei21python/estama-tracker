@@ -32,7 +32,7 @@ runner.py = 巡回・取込・検証・日次アーカイブ・data ブランチ
 
 | パス | 役割 |
 |---|---|
-| `runner.py` | 運用ランナー。ロック・DB検証・アーカイブ・data ブランチへのアップロード（blob SHA 照合／失敗時は前版へ復元）・`run_log` |
+| `runner.py` | 運用ランナー。ロック・DB検証・アーカイブ・data ブランチへのアップロード（blob SHA 照合／GitHub では失敗時に前版へ復元）・`run_log` |
 | `app/estama_scraper.py` | 出勤表の巡回・`snapshots`/`slot_events` への取込・完売スピード分析 |
 | `app/ranking_scraper.py` | 週間人気ランキング（14エリア×30人）取得・`cast_rankings` 保存・ウォッチリスト同期 |
 | `app/estama_tracker.py` | 分析 CLI。report / alert / sellout-forecast / monitor / notify / dashboard / cast など |
@@ -74,14 +74,14 @@ python3 -m venv venv
 |---|---|
 | 巡回・取込 | `app/estama_scraper.py --all-shops --import-db` |
 | ランキング＋ウォッチ同期 | `app/ranking_scraper.py --area all --import-db --sync-watchlist` |
-| 完売一覧／件数 | `estama_tracker.py sold-out --date D` / `counts --date D` |
-| アラート（根拠付き） | `estama_tracker.py alert --date D --min-days 3 --threshold 0.7` |
-| 4時間以内の完売確率 | `estama_tracker.py sellout-forecast --deep-shops app/deep_shops.json` |
-| 日次レポート | `estama_tracker.py report --date D`（`--no-evidence` で根拠省略） |
-| 監視（警告時 exit 1） | `estama_tracker.py monitor --db app/estama.db` |
-| 爆サイ | `bakusai.py discover` / `crawl --deep app/deep_shops.json` / `status` |
-| 通知・ダッシュボード | `estama_tracker.py notify` / `dashboard --out dashboard.html` |
-| 個別キャスト | `estama_tracker.py cast --shop-id X --cast-id Y` |
+| 完売一覧／件数 | `app/estama_tracker.py sold-out --date D` / `counts --date D` |
+| アラート（根拠付き） | `app/estama_tracker.py alert --date D --min-days 3 --threshold 0.7` |
+| 4時間以内の完売確率 | `app/estama_tracker.py sellout-forecast --deep-shops app/deep_shops.json` |
+| 日次レポート | `app/estama_tracker.py report --date D`（`--no-evidence` で根拠省略） |
+| 監視（警告時 exit 1） | `app/estama_tracker.py monitor --db app/estama.db` |
+| 爆サイ | `app/bakusai.py discover` / `crawl --deep app/deep_shops.json` / `status` |
+| 通知・ダッシュボード | `app/estama_tracker.py notify` / `dashboard --out dashboard.html` |
+| 個別キャスト | `app/estama_tracker.py cast --shop-id X --cast-id Y` |
 
 ### 予測・根拠・監視の要点
 
@@ -101,7 +101,7 @@ python3 -m venv venv
 | 毎日 05:10 | `./venv/bin/python app/bakusai.py crawl --deep app/deep_shops.json` |
 | 毎日 06:35 | `./venv/bin/python app/estama_tracker.py monitor` |
 
-publish は1実行1コミット。書込み直後に blob SHA を照合し、不一致なら1回だけ再送、それでも不一致なら前の blob に戻す（壊れた DB が最新版を潰さない）。
+publish は1実行1コミット。書込み直後に blob SHA を照合し、不一致なら1回だけ再送、それでも不一致なら前の blob に戻す（前版が無ければキーを削除）。壊れた DB が最新版を潰さない。publish が失敗した実行は `run_log` を `fail` にして runner が exit 1 する（cron 側で気づける）。
 
 ## テスト
 

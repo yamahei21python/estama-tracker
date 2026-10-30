@@ -215,6 +215,11 @@ check("title_match: short cjk name with subtitle",
 check("title_match: variant still needs boundary",
       (b.title_match("日本橋 belle femme ～ベルファーム～",
                      "Femme Fatale（ファムファタール）") or (0,))[0] < 0.8)
+# norm() deletes the separators, so the token fallback must also split
+# the RAW name - otherwise 'sirena~シレーナ~' only ever tries the
+# concatenated 'sirenaシレナ' and never matches
+check("title_match: raw separator segment yields a token",
+      b.title_match("梅田 sirena のスレ", "sirena~シレーナ~") == (0.6, "sirena"))
 
 # --------------------------------------------------------- search words --
 check("search_word: parenthesized note dropped",
@@ -472,6 +477,36 @@ client_b2 = b.Client(conn_b, http=FakeHTTP(pages=pages), budget=10,
 b.crawl(conn_b, client_b2, {1}, estama, log=lambda *a: None)
 check("budget: resume completes backfill", conn_b.execute(
     "SELECT COUNT(*) FROM bakusai_posts").fetchone()[0] == 3)
+
+# a dead/renamed thread (404) must not abort the rest of the deep tier
+conn_d = fresh_db("dead.db")
+for tid_d in ("2001", "2002"):
+    b.upsert_thread(conn_d, {"tid": tid_d, "bid": 6066, "title": "t",
+                             "replies": 1}, now)
+    b.link_shop(conn_d, tid_d, SHOPS[0], 1.0, "latest", "x", now)
+conn_d.commit()
+pages_d = {(2002, 1): thread_page(2002, 6066, 1, [
+    (1, "2026/10/20 10:00", "吉川", None)], max_page=1)}
+client_d = b.Client(conn_d, http=FakeHTTP(pages=pages_d), min_delay=0,
+                    max_delay=0, sleep=lambda s: None, log=lambda *a: None)
+sd = b.crawl(conn_d, client_d, {1}, estama, log=lambda *a: None)
+check("crawl: 404 thread does not abort the crawl",
+      sd["threads"] == 2 and sd["pages"] == 1 and sd["stopped"] is None)
+check("crawl: live thread still stored after a 404",
+      conn_d.execute("SELECT COUNT(*) FROM bakusai_posts"
+                     " WHERE thread_id='2002'").fetchone()[0] == 1)
+
+# every redirect hop is a billed request: the 500/day cap must not leak
+conn_r = fresh_db("redirect.db")
+fake_r = FakeHTTP(pages={(999, 2): thread_page(
+    999, 6066, 2, [(1, "2026/10/20 10:00", "x", None)], max_page=2)})
+client_r = b.Client(conn_r, http=fake_r, min_delay=0, max_delay=0,
+                    sleep=lambda s: None, log=lambda *a: None)
+rr = client_r.request(
+    "GET", "https://bakusai.com/thr_res/acode=7/ctgid=136/bid=6066/tid=999/")
+check("redirect: both hops billed and paced",
+      len(fake_r.calls) == 2 and client_r.spent_today() == 2)
+check("redirect: final 200 returned", rr.status_code == 200)
 
 # ------------------------------------------------------- backtrack/decoy --
 for no in range(700, 712):

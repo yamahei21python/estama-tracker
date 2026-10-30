@@ -82,7 +82,8 @@ def parse_shift_details(shift_str, slots=None):
 
     # Fallback to timetable slots if available
     if slots:
-        active_times = [s[0] for s in slots if s[1] in ("○", "×")]
+        active_times = [s[0] for s in slots
+                        if normalize_slot_mark(s[1]) in ("○", "×")]
         if active_times:
             start_s = active_times[0]
             # Slot is 30 mins, so add 30 mins to last slot time
@@ -154,6 +155,14 @@ def record_slot_events(conn, shop_id, cast, target_date, fetched_at,
     """
     slots = cast.get("slots") or []
     if not slots:
+        return 0
+    # A newer checkpoint already saw this cast-day, so a late replay of
+    # an older snapshot must not rewrite the recorded state.
+    newer = conn.execute(
+        "SELECT 1 FROM snapshots WHERE shop_id = ? AND target_date = ?"
+        " AND fetched_at > ? LIMIT 1",
+        (shop_id, target_date, fetched_at)).fetchone()
+    if newer:
         return 0
     cast_id = cast.get("cast_id")
     cast_key = str(cast_id) if cast_id is not None else cast["cast_name"]
@@ -358,6 +367,10 @@ class EstamaScraper:
             if not has_next_page:
                 break
             page += 1
+            if page >= 20:
+                print(f"  WARN: page 20 reached for shop {self.shop_id};"
+                      " stopping pagination", file=sys.stderr)
+                break
             time.sleep(0.3)
 
         return {
@@ -436,11 +449,14 @@ class EstamaScraper:
 
         final_casts = []
         for col in cast_cols:
-            marks = [s[1] for s in col["slots"]]
+            # Canonicalize so variant glyphs (◯/〇, ✕, －) count the
+            # same way they are recorded in slot_events.
+            marks = [m for m in (normalize_slot_mark(s[1])
+                                 for s in col["slots"]) if m]
             circles = marks.count("○")
             crosses = marks.count("×")
             dashes = marks.count("─")
-            tels = sum(1 for m in marks if m.upper() == "TEL")
+            tels = sum(1 for m in marks if m == "TEL")
 
             raw = col["status_raw"]
             norm = self._normalize_status(raw, circles, crosses, days_offset)
@@ -750,11 +766,14 @@ def _speed_rank_badge(first_time):
     """Return the sold-out speed badge for a first observed time."""
     if not first_time:
         return f"{COLOR_DIM}【判定不可】{COLOR_RESET}"
-    if first_time < "06:00":
+    mins = parse_clock(first_time)
+    if mins is None:
+        return f"{COLOR_DIM}【判定不可】{COLOR_RESET}"
+    if mins < parse_clock("06:00"):
         return f"{COLOR_MAGENTA}【深夜完売 🌙】{COLOR_RESET}"
-    if first_time <= "12:00":
+    if mins <= parse_clock("12:00"):
         return f"{COLOR_RED}【超速完売 ⚡ プレミア】{COLOR_RESET}"
-    if first_time <= "17:00":
+    if mins <= parse_clock("17:00"):
         return f"{COLOR_YELLOW}【夕方完売 🔥 人気】{COLOR_RESET}"
     return f"{COLOR_CYAN}【夜間完売】{COLOR_RESET}"
 
@@ -762,7 +781,7 @@ def _speed_rank_badge(first_time):
 def show_speed_ranking(date_str=None, db_path=DEFAULT_DB, shop_id=DEFAULT_SHOP_ID):
     """Analyze and display which casts sold out earliest on a given date."""
     if date_str is None:
-        date_str = now_jst().strftime("%Y-%m-%d")
+        date_str = (now_jst() - timedelta(hours=6)).strftime("%Y-%m-%d")
 
     conn = connect_db(db_path, apply_schema=False)
     cur = conn.cursor()
@@ -957,7 +976,12 @@ def main():
         print("=" * 75, file=sys.stderr)
 
         for idx, shop_entry in enumerate(shops, 1):
-            shop_id = int(shop_entry["shop_id"])
+            try:
+                shop_id = int(shop_entry["shop_id"])
+            except (KeyError, TypeError, ValueError) as e:
+                print(f"[{idx:2d}/{total_shops}] {COLOR_RED}不正な店舗エントリ"
+                      f"をスキップ: {e}{COLOR_RESET}", file=sys.stderr)
+                continue
             shop_name = shop_entry.get("name", f"Shop {shop_id}")
             print(f"[{idx:2d}/{total_shops}] {COLOR_CYAN}{shop_name}{COLOR_RESET} (ID: {shop_id})", file=sys.stderr)
 

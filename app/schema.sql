@@ -164,8 +164,8 @@ CREATE TABLE IF NOT EXISTS slot_events (
     UNIQUE (shop_id, cast_key, target_date, slot_time, observed_at)
 );
 
-CREATE INDEX IF NOT EXISTS idx_slot_events_lookup
-    ON slot_events (shop_id, cast_key, target_date, slot_time, observed_at);
+-- no separate lookup index: UNIQUE(...) above already creates one on
+-- the same columns, and a duplicate only costs write time
 CREATE INDEX IF NOT EXISTS idx_slot_events_date
     ON slot_events (target_date, slot_minutes);
 

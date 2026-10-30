@@ -5,6 +5,7 @@ Self-contained: builds a tiny DB from schema.sql in a temp dir.
 Run: python3 tests/test_runner.py
 """
 import importlib.util
+import json
 import os
 import sqlite3
 import subprocess
@@ -71,6 +72,33 @@ check("archive fires only once", r.maybe_archive(now) is None)
 early = datetime(2026, 10, 26, 4, 0, tzinfo=JST)
 check("no archive before the flip", r.maybe_archive(early) is None)
 
+# a site flip before the last checkpoint leaves rows for BOTH the closed
+# day and the new business date in the DB; MAX(target_date) is then the
+# new date, so the archive must key on expected-1, never on MAX
+flip_db = SCRATCH / "app" / "flip.db"
+con = sqlite3.connect(flip_db)
+con.executescript((ROOT / "app" / "schema.sql").read_text())
+con.execute("INSERT INTO shops VALUES (1, '店A', '梅田', NULL, NULL)")
+for d in ("2026-10-26", "2026-10-27"):
+    con.execute(
+        "INSERT INTO snapshots (shop_id, cast_name, status_norm,"
+        " target_date, fetched_time) VALUES (1, 'a', 'available', ?, '10:00')",
+        (d,))
+con.commit()
+con.close()
+orig_db, orig_state = r.DB, r.STATE_FILE
+r.DB = flip_db
+r.STATE_FILE = SCRATCH / "archive_state_flip.json"
+try:
+    key_flip = r.maybe_archive(now)
+finally:
+    r.DB, r.STATE_FILE = orig_db, orig_state
+check("archive keys on closed date even after a site flip",
+      key_flip == "archive/estama-2026-10-26.db")
+check("archive records the closed date in state", json.loads(
+    (SCRATCH / "archive_state_flip.json").read_text()
+)["last_archived"] == "2026-10-26")
+
 r.upload_db()
 live = SCRATCH / "r2_local" / "estama.db"
 check("live key exists after upload", live.exists())
@@ -105,6 +133,28 @@ check("failed verification retries the upload once",
 check("failed verification restores the previous live blob",
       restores == [("estama.db", "prevsha")])
 
+# no previous blob (first publish ever): the bad live key is deleted so
+# the next run does not mistake an unverifiable object for a good one
+deletes = []
+orig = (r.backend_name, r.storage_put, r.storage_verify,
+        r._gh_live_blob, r._gh_restore, r.storage_delete)
+r.backend_name = lambda: "github"
+r.storage_put = lambda key, f: None
+r.storage_verify = lambda key, f: False
+r._gh_live_blob = lambda key: None
+r._gh_restore = lambda key, sha: None
+r.storage_delete = lambda key: deletes.append(key)
+try:
+    r.upload_db()
+    check("upload raises (no previous blob)", False)
+except IOError:
+    check("upload raises (no previous blob)", True)
+finally:
+    (r.backend_name, r.storage_put, r.storage_verify,
+     r._gh_live_blob, r._gh_restore, r.storage_delete) = orig
+check("failed verification with no previous blob deletes the live key",
+      deletes == ["estama.db"])
+
 holder = subprocess.Popen([sys.executable, "-c",
                            "import fcntl,time; f=open('/tmp/estama-runner-test/runner.lock','w');"
                            " fcntl.flock(f, fcntl.LOCK_EX); time.sleep(8)"])
@@ -135,6 +185,23 @@ check("run_log open/close lifecycle",
       row[0] == "prune" and row[1] == "ok" and row[2] == "banned=0"
       and row[3] is not None)
 con.close()
+
+# publish failure after a good job: the run row must say fail (the
+# artifact is stale) and main() must exit non-zero for cron
+orig = (r.job_checkpoint, r.publish, sys.argv)
+r.job_checkpoint = lambda: "snapshots +1"
+r.publish = lambda: (_ for _ in ()).throw(IOError("boom"))
+sys.argv = ["runner.py", "checkpoint"]
+try:
+    rc = r.main()
+finally:
+    r.job_checkpoint, r.publish, sys.argv = orig
+con = sqlite3.connect(db)
+st = con.execute("SELECT status, detail FROM run_log"
+                 " ORDER BY run_id DESC LIMIT 1").fetchone()
+con.close()
+check("publish failure exits 1 and marks the run fail",
+      rc == 1 and st[0] == "fail" and "publish failed" in st[1])
 
 # scrape_log: per-shop audit links back to its run via ESTAMA_RUN_ID
 sys.path.insert(0, str(ROOT / "app"))

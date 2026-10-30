@@ -14,3 +14,9 @@ ranking_weekly_*.json
 venv/
 # local CLI permissions (machine-specific)
 .qoder/
+.perch/mcp.json
+# machine-specific / generated
+storage.json
+dashboard.html
+*.log
+.DS_Store

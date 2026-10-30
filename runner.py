@@ -6,16 +6,17 @@ Wraps the scrapers with the operational safeguards agreed 2026-10-26:
 1. Single-instance lock (fcntl.flock) shared by checkpoint and ranking jobs,
    so a slow run can never overlap the next one and corrupt the SQLite DB.
 2. Upload safety: the DB is verified (PRAGMA integrity_check + row counts)
-   and snapshotted through the SQLite backup API *before* upload. The upload
-   goes to a staging key first, its size is verified, and only then is it
-   promoted over the live `estama.db` key - a bad file can never replace the
-   last good one.
-3. Business-date daily archive: before scraping, if the DB's latest
-   target_date (the business date, which flips at ~05:00-06:00 JST) is older
-   than the expected current business date, the finished business day is
-   archived to `archive/estama-<business-date>.db` exactly once.
+   and snapshotted through the SQLite backup API *before* upload. The live
+   object is then written in one commit and verified against that snapshot
+   (GitHub: blob SHA); on a verification failure the write is retried once
+   and, if it still fails, GitHub restores the previous blob (or deletes the
+   key when there was none) so the branch never keeps a corrupt DB.
+3. Business-date daily archive: keyed on the CLOSED business date (expected
+   business date - 1), not on MAX(target_date). When the site flips before
+   the last checkpoint of the day, a MAX-based check would never archive the
+   finished day. `archive/estama-<closed-date>.db` is written once.
 
-Storage backends (staging -> verify -> promote semantics everywhere):
+Storage backends (write live key + verify; GitHub restores on mismatch):
 - GitHub: when BASE/storage.json says {"backend": "github", ...}, objects are
   stored as files on a dedicated `data` branch of the code repo (DB files
   gzip-compressed). Interim backend until the R2 migration; auth rides the
@@ -216,11 +217,11 @@ def _gh_verify(key: str, local_file: Path) -> bool:
 
 
 def _gh_live_blob(key: str) -> str | None:
-    """Blob SHA currently stored at key (None when missing/unreachable)."""
-    try:
-        entry = _gh_entries().get(gh_path(key))
-    except Exception:
-        return None
+    """Blob SHA currently stored at key (None when missing).
+
+    API errors propagate on purpose: upload_db must abort before
+    writing when it cannot capture a rollback target."""
+    entry = _gh_entries().get(gh_path(key))
     return entry["sha"] if entry else None
 
 
@@ -324,15 +325,6 @@ def snapshot_copy(src: Path, dst: Path) -> None:
         s.close()
 
 
-def db_business_date(path: Path) -> str | None:
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    try:
-        row = con.execute("SELECT MAX(target_date) FROM snapshots").fetchone()
-        return row[0] if row else None
-    finally:
-        con.close()
-
-
 def snapshot_count(path: Path) -> int:
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
@@ -356,18 +348,24 @@ def upload_db() -> dict:
     stats = verify_db(DB)
     STAGING_DIR.mkdir(parents=True, exist_ok=True)
     snap = STAGING_DIR / f"estama-{now_jst():%Y%m%d-%H%M%S}.db"
-    snapshot_copy(DB, snap)
-    verify_db(snap)  # the copy itself must be intact before it can go live
-    size = snap.stat().st_size
-    prev_blob = _gh_live_blob(LIVE_KEY) if backend_name() == "github" else None
+    size = 0
     try:
+        snapshot_copy(DB, snap)
+        verify_db(snap)  # the copy itself must be intact before it can go live
+        size = snap.stat().st_size
+        prev_blob = (_gh_live_blob(LIVE_KEY)
+                     if backend_name() == "github" else None)
         storage_put(LIVE_KEY, snap)
         if not storage_verify(LIVE_KEY, snap):
             storage_put(LIVE_KEY, snap)  # retry once from the good copy
         if not storage_verify(LIVE_KEY, snap):
-            if prev_blob:
-                _gh_restore(LIVE_KEY, prev_blob)
-                log(f"upload: verified live write failed, restored {LIVE_KEY}")
+            if backend_name() == "github":
+                if prev_blob:
+                    _gh_restore(LIVE_KEY, prev_blob)
+                    log(f"upload: verified live write failed, restored {LIVE_KEY}")
+                else:
+                    storage_delete(LIVE_KEY)
+                    log(f"upload: verified live write failed, deleted {LIVE_KEY}")
             raise IOError("live object verification failed after restore")
     finally:
         snap.unlink(missing_ok=True)
@@ -382,28 +380,49 @@ def expected_business_date(now: datetime) -> str:
 
 
 def maybe_archive(now: datetime) -> str | None:
-    """Archive the just-finished business day once, before new data lands."""
-    bd = db_business_date(DB)
-    if not bd or bd >= expected_business_date(now):
-        return None
+    """Archive the just-finished business day once.
+
+    Keyed on the CLOSED business date (expected - 1), not on
+    MAX(target_date): when the site flips before the last checkpoint of
+    the day, that run already imports the new date and a MAX-based
+    check would never archive the finished day at all."""
+    closed = (datetime.fromisoformat(expected_business_date(now))
+              - timedelta(days=1)).date().isoformat()
     state = {}
     if STATE_FILE.exists():
         state = json.loads(STATE_FILE.read_text())
-    if state.get("last_archived") == bd:
+    if state.get("last_archived") == closed:
         return None
-    key = f"archive/estama-{bd}.db"
+    try:
+        con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+        try:
+            has_day = con.execute(
+                "SELECT EXISTS(SELECT 1 FROM snapshots"
+                " WHERE target_date = ?)", (closed,)).fetchone()[0]
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+    if not has_day:
+        return None
+    key = f"archive/estama-{closed}.db"
     if not storage_exists(key):
         STAGING_DIR.mkdir(parents=True, exist_ok=True)
-        snap = STAGING_DIR / f"archive-{bd}.db"
-        snapshot_copy(DB, snap)
-        verify_db(snap)
-        storage_put(key, snap)
-        if not storage_verify(key, snap):
-            raise IOError(f"archive upload verification failed for {key}")
-        snap.unlink(missing_ok=True)
-    state["last_archived"] = bd
+        snap = STAGING_DIR / f"archive-{closed}.db"
+        try:
+            snapshot_copy(DB, snap)
+            verify_db(snap)
+            storage_put(key, snap)
+            if not storage_verify(key, snap):
+                # leave no unverifiable object behind, or the next run's
+                # storage_exists() would skip the repair forever
+                storage_delete(key)
+                raise IOError(f"archive upload verification failed for {key}")
+        finally:
+            snap.unlink(missing_ok=True)
+    state["last_archived"] = closed
     STATE_FILE.write_text(json.dumps(state))
-    log(f"archive ok: {key} (business date {bd} closed)")
+    log(f"archive ok: {key} (business date {closed} closed)")
     return key
 
 
@@ -576,8 +595,20 @@ def job_prune() -> str:
     return f"banned={len(candidates)}"
 
 
+def _archive_best_effort() -> None:
+    """A failed archive must not block the live DB update.
+
+    The archive is a point-in-time copy; the rows themselves stay in the
+    DB, and a failed key is deleted on verification failure so the next
+    run retries it."""
+    try:
+        maybe_archive(now_jst())
+    except Exception as exc:
+        log(f"archive failed (job continues): {type(exc).__name__}: {exc}")
+
+
 def job_checkpoint() -> str:
-    maybe_archive(now_jst())
+    _archive_best_effort()
     before = snapshot_count(DB)
     run_scraper(["estama_scraper.py", "--all-shops", "--import-db"])
     run_scraper(["estama_tracker.py", "rollup"])  # refresh daily_cast_status
@@ -612,7 +643,7 @@ def publish() -> None:
 
 
 def job_ranking() -> str:
-    maybe_archive(now_jst())
+    _archive_best_effort()
     run_scraper(["ranking_scraper.py", "--area", "all", "--import-db",
                  "--save-json", "--sync-watchlist",
                  "--sync-max-rank", "30"], timeout=600)
@@ -659,11 +690,13 @@ def main() -> int:
     if job in ("checkpoint", "ranking"):
         try:
             publish()
-        except Exception as exc:  # upload failed - record it, don't
-            # pretend the job fully succeeded
+        except Exception as exc:  # upload failed - the artifact is stale
+            # and nobody downstream can tell, so flip the row and exit
+            # non-zero for cron even though the scrape itself succeeded
             log(f"publish failed after ok: {type(exc).__name__}: {exc}")
-            run_log_mark(job, "fail",
-                         f"publish failed: {type(exc).__name__}: {exc}")
+            run_log_close(run_id, "fail",
+                          f"job ok, publish failed: {type(exc).__name__}: {exc}")
+            return 1
     log(f"DONE {job}")
     return 0
 

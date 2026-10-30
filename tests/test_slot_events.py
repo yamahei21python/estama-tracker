@@ -130,6 +130,29 @@ n = record_slot_events(conn, 1, cast3, "2026-10-30",
                        "2026-10-30 09:30:00 JST", "09:30")
 check("older checkpoint replay inserts 0", n == 0)
 
+# ---------- replay of an older snapshot, unseen slot ----------
+# a slot with no prior event would otherwise be recorded as a first
+# sighting even though a newer checkpoint already saw this cast-day
+conn5 = fresh()
+conn5.execute(
+    "INSERT INTO snapshots (shop_id, cast_name, status_norm, target_date,"
+    " fetched_at, fetched_time) VALUES (1, 'テスト嬢', 'available',"
+    " '2026-10-30', '2026-10-30 11:30:00 JST', '11:30')")
+cast5 = make_cast([["13:00", "○"]])
+n = record_slot_events(conn5, 1, cast5, "2026-10-30",
+                       "2026-10-30 09:30:00 JST", "09:30")
+check("replay older than an existing snapshot inserts 0", n == 0)
+
+# the current import's own snapshot must not block (same fetched_at)
+conn6 = fresh()
+conn6.execute(
+    "INSERT INTO snapshots (shop_id, cast_name, status_norm, target_date,"
+    " fetched_at, fetched_time) VALUES (1, 'テスト嬢', 'available',"
+    " '2026-10-30', '2026-10-30 10:30:00 JST', '10:30')")
+n = record_slot_events(conn6, 1, cast5, "2026-10-30",
+                       "2026-10-30 10:30:00 JST", "10:30")
+check("snapshot with the same fetched_at does not block", n == 1)
+
 # ---------- unknown shift: no initial dashes, states still kept ----------
 conn2 = fresh()
 cast4 = make_cast([["12:00", "─"], ["12:30", "○"]], cast_id=None,

@@ -201,10 +201,14 @@ def slot_loss_evidence(conn, shop_id, cast_key, date):
             "n": len(rows)}
 
 
-def bakusai_evidence(bconn, shop_id, cast_name, limit=500):
+def bakusai_evidence(bconn, shop_id, cast_name):
     """{'n', 'last', 'quote'} for exact full-name mentions in threads
     attributed to this shop. Only confidence >= 0.8 threads are read;
-    decoy candidates never reach this function's output."""
+    decoy candidates never reach this function's output.
+
+    The name filter runs over every attributed post (no LIMIT before
+    it): truncating to the newest N posts first would hide older
+    mentions and undercount n."""
     if bconn is None:
         return None
     try:
@@ -213,20 +217,23 @@ def bakusai_evidence(bconn, shop_id, cast_name, limit=500):
                FROM bakusai_posts p
                JOIN bakusai_shop_map m ON m.thread_id = p.thread_id
                WHERE m.shop_id = ? AND m.confidence >= ?
-               ORDER BY p.posted_at DESC LIMIT ?""",
-            (shop_id, MIN_BAKUSAI_CONFIDENCE, limit)).fetchall()
+               ORDER BY p.posted_at DESC""",
+            (shop_id, MIN_BAKUSAI_CONFIDENCE))
     except sqlite3.Error:
         return None
     target = norm_person(cast_name)
     if not target:
         return None
-    hits = [r for r in rows
-            if target in norm_text(r["body"]).casefold()]
-    if not hits:
+    hits, latest = 0, None
+    for r in rows:
+        if target in norm_text(r["body"]).casefold():
+            hits += 1
+            if latest is None:
+                latest = r
+    if not latest:
         return None
-    latest = hits[0]
     quote = re.sub(r"\s+", " ", (latest["body"] or "")).strip()
-    return {"n": len(hits),
+    return {"n": hits,
             "last": (latest["posted_at"] or "")[:10] or None,
             "quote": quote[:90]}
 

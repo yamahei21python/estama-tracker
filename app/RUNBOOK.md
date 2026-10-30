@@ -126,5 +126,5 @@ for t in tests/test_*.py; do ./venv/bin/python "$t" || break; done
 | `monitor` が exit 1 | 冒頭の警告（checkpoint 欠損 / 0行店 / fail 率 / 枠イベント取得率）を確認。店別 fail なら `scrape_log`、scheduler 側なら `run_log` |
 | 爆サイ search が failed | セッション Cookie が取れていない（最初の GET が失敗）。ネットワーク復旧後に `discover` を再実行。失敗中も最新30件＋辞書で動く |
 | crawl が止まった | 1日500リクエスト上限。翌日同じコマンドで再開（バックフィルはページ単位で保存済み） |
-| publish が失敗した | runner が自動で前の blob に戻す。`run_log` に fail が残る。次回 job で再送される |
+| publish が失敗した | GitHub では runner が自動で前の blob に戻す（前版が無ければキー削除）。`run_log` は fail になり runner は exit 1 する。DB 自体は VM のワーキングコピーに残るので、次回 job の publish で再送される |
 | 口コミ根拠が出ない | `ESTAMA_REVIEW_DB` のパスと DB の存在を確認（無くても他の根拠は出る） |

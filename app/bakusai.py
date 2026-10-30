@@ -38,7 +38,9 @@ import sys
 import time
 import unicodedata
 from datetime import datetime
+from email.utils import mktime_tz, parsedate_tz
 from pathlib import Path
+from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
 BASE = Path(__file__).resolve().parent
@@ -297,11 +299,19 @@ def title_match(title, shop_name):
     for v in variants[1:]:
         if len(v) >= 3 and _distinctive(v) and _title_has(nt, v):
             return 0.9, v
-    for tok in variants:
+    # Token fallback: split the RAW name first - norm() deletes the
+    # separators, which made this branch unreachable for names like
+    # 'sirena~シレーナ~'.
+    toks = list(variants)
+    for seg in re.split(r"[~|｜/〜～&＆]", shop_name or ""):
+        n = norm(seg)
+        if n:
+            toks.append(n)
+    for tok in toks:
         for t in _tokens(tok):
             if t in GENERIC_WORDS or len(t) < 4 or not _distinctive(t):
                 continue
-            if t in nt:
+            if _title_has(nt, t):
                 return 0.6, t
     return None
 
@@ -414,7 +424,7 @@ class Client:
                  min_delay=MIN_DELAY, max_delay=MAX_DELAY, sleep=None,
                  log=print):
         self.conn = conn
-        self.day = day or now_jst().strftime("%Y-%m-%d")
+        self._fixed_day = day
         self.budget = budget
         self.min_delay = min_delay
         self.max_delay = max_delay
@@ -431,6 +441,12 @@ class Client:
             self._http = self._requests_http
         else:
             self._http = http
+
+    @property
+    def day(self):
+        """Budget day (JST) - re-evaluated so a run crossing midnight
+        cannot bill the new day's requests to the previous one."""
+        return self._fixed_day or now_jst().strftime("%Y-%m-%d")
 
     def _requests_http(self, method, url, data, headers, redirects):
         r = self._session.request(method, url, data=data, headers=headers,
@@ -454,23 +470,58 @@ class Client:
         self.conn.commit()
         self.requests_made += 1
 
-    def request(self, method, url, data=None, referer=None, redirects=True,
-                kind="misc"):
-        headers = {}
-        if referer:
-            headers["Referer"] = referer
+    @staticmethod
+    def _retry_after(r):
+        """Retry-After seconds: integer form or an HTTP date."""
+        raw = str((getattr(r, "headers", {}) or {}).get("Retry-After", ""))
+        try:
+            wait = int(raw.strip())
+        except (TypeError, ValueError):
+            stamp = parsedate_tz(raw)
+            wait = int(mktime_tz(stamp) - time.time()) if stamp else 10
+        wait = max(wait, 1)
+        if wait > 3600:
+            raise BudgetExhausted(
+                f"429 Retry-After が {wait}s のため本日は停止")
+        return wait
+
+    def _send(self, method, url, data, headers, kind):
+        """One HTTP hit: bill it, pace it, honour 429 Retry-After."""
         attempts = 0
         while True:
             self._spend(kind)
             if self.requests_made > 1:
                 self._sleep(random.uniform(self.min_delay, self.max_delay))
-            r = self._http(method, url, data, headers, redirects)
+            r = self._http(method, url, data, headers, False)
             if getattr(r, "status_code", 0) != 429 or attempts >= 2:
                 return r
             attempts += 1
-            wait = min(int(r.headers.get("Retry-After", "10") or 10), 60)
+            wait = self._retry_after(r)
             self._log(f"  429: {wait}s 待機して再試行")
             self._sleep(wait)
+
+    def request(self, method, url, data=None, referer=None, redirects=True,
+                kind="misc"):
+        headers = {}
+        if referer:
+            headers["Referer"] = referer
+        hops = 0
+        while True:
+            r = self._send(method, url, data, headers, kind)
+            loc = (getattr(r, "headers", {}) or {}).get("Location")
+            code = getattr(r, "status_code", 0)
+            if not redirects or not loc or code not in (301, 302, 303,
+                                                        307, 308):
+                return r
+            hops += 1
+            if hops > 5:
+                return r
+            # Follow manually so every hop is billed and paced; letting
+            # requests follow silently made the 500/day cap leak.
+            headers["Referer"] = url
+            url = urljoin(url, loc)
+            if code not in (307, 308):
+                method, data = "GET", None
 
     # -- discovery -----------------------------------------------------
     def latest_threads(self, bid):
@@ -646,7 +697,9 @@ def discover(conn, client, shops, boards=None, search=True, now=None,
                     summary["links"] += 1
         conn.commit()
 
-    if failures and failures == len(shops):
+    if summary["budget_stopped"]:
+        summary["mode"] = "budget_stopped"
+    elif failures and failures == len(shops):
         summary["mode"] = "fallback_latest_only"
     elif failures:
         summary["mode"] = "partial_search"
@@ -865,11 +918,13 @@ def sync_thread(conn, client, thread, casts, now, max_pages=None, log=print):
                     (tid, MIN_ALERT_CONFIDENCE))], casts, now)
             conn.commit()
         if not added:
-            # The thread grew past the stored max_page between runs:
-            # this page holds only old posts, but the fresh ones are on
-            # the newest page the parser just reported.
-            if pg["max_page"] > page and (not max_pages
-                                          or pages_done < max_pages):
+            # Stale stored max_page: the FIRST fetch of the run may land
+            # on a page that now holds only old posts, with the fresh
+            # ones on the newest page the parser just reported. After
+            # that first check we are walking down, so a larger
+            # max_page must not send us back up again.
+            if (pages_done == 1 and pg["max_page"] > page
+                    and (not max_pages or pages_done < max_pages)):
                 page = pg["max_page"]
                 continue
             break
@@ -900,8 +955,13 @@ def crawl(conn, client, deep_shop_ids, estama_db, now=None, max_pages=None,
                "requests": 0}
     try:
         for t in threads:
-            summary["pages"] += sync_thread(conn, client, t, casts, now,
-                                            max_pages=max_pages, log=log)
+            try:
+                summary["pages"] += sync_thread(conn, client, t, casts, now,
+                                                max_pages=max_pages, log=log)
+            except SearchFailed as e:
+                # One dead/renamed thread must not starve the rest of
+                # the deep tier (a 404 used to abort the whole crawl).
+                log(f"  tid={t['thread_id']} 取得失敗: {e}")
     except BudgetExhausted as e:
         summary["stopped"] = str(e)
         log(f"  停止: {e}（次回再開）")
@@ -982,8 +1042,14 @@ def cmd_discover(args):
     summary = discover(conn, client, shops, boards=boards,
                        search=not args.no_search, now=now_jst().strftime(
                            "%Y-%m-%d %H:%M:%S"), log=log)
-    data = write_deep_shops(conn, args.deep_out)
     log(f"結果: {summary}")
+    if summary["budget_stopped"]:
+        log("予算上限で停止: deep tier は更新しない（既存ファイルを維持）")
+        return 1
+    if summary["mode"] == "fallback_latest_only":
+        log("検索が全件失敗: deep tier は更新しない（既存ファイルを維持）")
+        return 1
+    data = write_deep_shops(conn, args.deep_out)
     log(f"deep tier: {len(data['shops'])} 店 -> {args.deep_out}")
     return 0
 
