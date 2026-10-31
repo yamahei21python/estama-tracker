@@ -668,6 +668,36 @@
       "name": "ANESSA大阪≪南大阪≫",
       "area": "その他大阪府",
       "source_url": "https://estama.jp/shop/49940/schedule/"
+    },
+    {
+      "shop_id": 35218,
+      "name": "ぽっちゃりのメンズエステで癒される",
+      "area": "梅田・大阪駅",
+      "source_url": "https://estama.jp/shop/35218/schedule/"
+    },
+    {
+      "shop_id": 30748,
+      "name": "スクSPA難波・心斎橋店",
+      "area": "心斎橋・長堀橋",
+      "source_url": "https://estama.jp/shop/30748/schedule/"
+    },
+    {
+      "shop_id": 32105,
+      "name": "隠れ家",
+      "area": "京橋・南森町・天満",
+      "source_url": "https://estama.jp/shop/32105/schedule/"
+    },
+    {
+      "shop_id": 46477,
+      "name": "マイクロビキニメンエス~素人専門店~天王寺・谷町店",
+      "area": "天王寺・谷町",
+      "source_url": "https://estama.jp/shop/46477/schedule/"
+    },
+    {
+      "shop_id": 47286,
+      "name": "dandy lab (ダンディーラボ)",
+      "area": "堺・堺東・我孫子",
+      "source_url": "https://estama.jp/shop/47286/schedule/"
     }
   ],
   "status": "CONFIGURED",
