@@ -722,6 +722,48 @@
       "name": "Mrs.Nostalgia",
       "area": "堺・堺東・我孫子",
       "source_url": "https://estama.jp/shop/40127/schedule/"
+    },
+    {
+      "shop_id": 51121,
+      "name": "恋する放課後ヒロイン～梅田校～【恋ヒロ】",
+      "area": "梅田・大阪駅",
+      "source_url": "https://estama.jp/shop/51121/schedule/"
+    },
+    {
+      "shop_id": 41850,
+      "name": "天上人PREMIUM",
+      "area": "堺筋本町・本町・阿波座",
+      "source_url": "https://estama.jp/shop/41850/schedule/"
+    },
+    {
+      "shop_id": 38448,
+      "name": "Chaton〜シャトン〜",
+      "area": "堺筋本町・本町・阿波座",
+      "source_url": "https://estama.jp/shop/38448/schedule/"
+    },
+    {
+      "shop_id": 28578,
+      "name": "アヌSPA",
+      "area": "天王寺・谷町",
+      "source_url": "https://estama.jp/shop/28578/schedule/"
+    },
+    {
+      "shop_id": 39799,
+      "name": "祇園the.Mrs(ギオンザミセス)",
+      "area": "十三・新大阪・西中島",
+      "source_url": "https://estama.jp/shop/39799/schedule/"
+    },
+    {
+      "shop_id": 46807,
+      "name": "マダム江坂",
+      "area": "江坂",
+      "source_url": "https://estama.jp/shop/46807/schedule/"
+    },
+    {
+      "shop_id": 33871,
+      "name": "Cecile 〜セシル〜",
+      "area": "高槻・茨木",
+      "source_url": "https://estama.jp/shop/33871/schedule/"
     }
   ],
   "status": "CONFIGURED",
