@@ -764,6 +764,12 @@
       "name": "Cecile 〜セシル〜",
       "area": "高槻・茨木",
       "source_url": "https://estama.jp/shop/33871/schedule/"
+    },
+    {
+      "shop_id": 30754,
+      "name": "君色ドレスSPA~最高峰クラスの美女~",
+      "area": "日本橋",
+      "source_url": "https://estama.jp/shop/30754/schedule/"
     }
   ],
   "status": "CONFIGURED",
