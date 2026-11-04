@@ -770,6 +770,36 @@
       "name": "君色ドレスSPA~最高峰クラスの美女~",
       "area": "日本橋",
       "source_url": "https://estama.jp/shop/30754/schedule/"
+    },
+    {
+      "shop_id": 38677,
+      "name": "なにわ女子【日本橋マンション型】",
+      "area": "日本橋",
+      "source_url": "https://estama.jp/shop/38677/schedule/"
+    },
+    {
+      "shop_id": 40258,
+      "name": "スーパープライス",
+      "area": "堺筋本町・本町・阿波座",
+      "source_url": "https://estama.jp/shop/40258/schedule/"
+    },
+    {
+      "shop_id": 50316,
+      "name": "天華~テンカ~",
+      "area": "堺筋本町・本町・阿波座",
+      "source_url": "https://estama.jp/shop/50316/schedule/"
+    },
+    {
+      "shop_id": 50682,
+      "name": "Jewel",
+      "area": "京橋・南森町・天満",
+      "source_url": "https://estama.jp/shop/50682/schedule/"
+    },
+    {
+      "shop_id": 51743,
+      "name": "Mrs.Blue Dahlia  （ミセスブルーダリア）",
+      "area": "高槻・茨木",
+      "source_url": "https://estama.jp/shop/51743/schedule/"
     }
   ],
   "status": "CONFIGURED",
