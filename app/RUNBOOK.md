@@ -185,6 +185,12 @@ gh workflow run collect.yml -f job=checkpoint -f mode=backup
 `runner.py guard --max-age 90` が `status/last_ok.json` を読み、VM が90分以内に
 成功していれば何もせず終了する。VM が落ちている時だけ動く。
 
+`status/last_ok.json` が **404 のときは「成功記録なし」** として guard は代走（exit 3）する。
+したがって、マージ直後（VM がまだ一度も heartbeat を書いていない間）に
+`mode=backup` を回すと、VM が生きていても代走してしまう。初回の VM checkpoint が
+heartbeat を書くまで backup は使わない。両者が重なった場合も、publish 時の
+「自分の開始後に他者が publish したか」検査で片方が上書きを拒否する（1時間分の欠落で済む）。
+
 VM が復帰した場合、checkpoint/ranking の冒頭で `_pull_if_remote_newer()` が
 heartbeat と自分の最終成功を比較し、remote が新しければ先に pull する。
 代走分の行が上書きで消えることはない。
