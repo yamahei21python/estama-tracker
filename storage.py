@@ -222,10 +222,34 @@ def gw_path(key: str) -> str:
     return key
 
 
+def gz_deterministic(data: bytes) -> bytes:
+    """gzip.compress with every header byte pinned.
+
+    gzip.compress(mtime=0) still writes the platform byte (offset 9):
+    a Unix writer emits 0x03, macOS/Windows emit 0xff. The *body* is
+    identical, so the object is fine, but its MD5 - what the gateway's
+    HEAD ETag reports - differs. That made storage_verify fail for a
+    perfectly good object whenever the reader ran on a different OS
+    than the writer (verified live 2026-11-05: local Mac md5
+    657c5c97..., the VM-written object 5ea2e806..., same gunzipped
+    bytes). Pin the byte to 0x03 so every host derives the same
+    payload. (Byte 8, XFL, is already fixed by the level.)
+
+    Note this makes re-compression deterministic for one zlib build,
+    not across zlib implementations: a body-level difference would
+    still change the MD5. That is why the authoritative check stays
+    "PUT then verify the same payload in the same process", and why
+    cross-host verification is compared by size as well.
+    """
+    out = bytearray(gzip.compress(data, mtime=0))
+    out[9] = 0x03  # OS = Unix, on every platform
+    return bytes(out)
+
+
 def _gw_payload(local_file: Path, key: str) -> bytes:
     data = local_file.read_bytes()
     if gw_path(key) != key:
-        data = gzip.compress(data, mtime=0)
+        data = gz_deterministic(data)
     return data
 
 
@@ -317,15 +341,31 @@ def _gw_size(key: str) -> int | None:
 def _gw_verify(key: str, local_file: Path) -> bool:
     """Content proof for the gateway: the payload's MD5 must equal the
     ETag the Worker reports. Falls back to a size comparison when the
-    Worker returns no ETag."""
+    Worker returns no ETag.
+
+    A mismatch is reported on stderr with both values: a bare False
+    would leave "did the upload fail, or did we compare the wrong
+    bytes?" unanswerable in a cron log.
+    """
     payload = _gw_payload(local_file, key)
     head = _gw_head(key)
     if head is None:
+        sys.stderr.write(f"gw_verify {key}: object missing\n")
         return False
     size, etag = head
+    local_md5 = hashlib.md5(payload).hexdigest()
     if etag:
-        return etag == hashlib.md5(payload).hexdigest()
-    return size == len(payload)
+        if etag == local_md5:
+            return True
+        sys.stderr.write(
+            f"gw_verify {key}: MD5 mismatch (remote ETag {etag}, "
+            f"local {local_md5}, sizes {size}/{len(payload)})\n")
+        return False
+    if size != len(payload):
+        sys.stderr.write(
+            f"gw_verify {key}: size mismatch ({size} != {len(payload)})\n")
+        return False
+    return True
 
 
 def _gw_delete(key: str) -> None:

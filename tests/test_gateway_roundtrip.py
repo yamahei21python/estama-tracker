@@ -172,6 +172,33 @@ storage.storage_put("estama.db", src)
 check("upload stored the gz object", "estama.db.gz" in STORE)
 check("stored payload is gzipped",
       gzip.decompress(STORE["estama.db.gz"]) == raw)
+# The stored payload must be the pinned-header form: the VM (Linux)
+# and a Mac/GHA reader have to derive the same MD5 from the same DB,
+# otherwise storage_verify false-fails across hosts (live 2026-11-05).
+check("stored payload is gz_deterministic(raw)",
+      STORE["estama.db.gz"] == storage.gz_deterministic(raw))
+check("gzip OS header byte is pinned to 0x03",
+      storage.gz_deterministic(raw)[9] == 0x03)
+# Simulate a host whose gzip writer stamps a different OS byte
+# (macOS/Windows emit 0xFF): the pinned header must make both hosts
+# derive the same payload and therefore the same ETag.
+real_compress = gzip.compress
+
+
+def mac_compress(data, *a, **kw):
+    out = bytearray(real_compress(data, *a, **kw))
+    out[9] = 0xFF
+    return bytes(out)
+
+
+gzip.compress = mac_compress
+try:
+    pinned_from_mac = storage.gz_deterministic(raw)
+finally:
+    gzip.compress = real_compress
+check("a foreign OS byte normalizes to the same MD5",
+      pinned_from_mac == storage.gz_deterministic(raw)
+      and pinned_from_mac[9] == 0x03)
 check("Bearer token sent directly", SEEN_AUTH[-1] == f"Bearer {TOKEN}")
 
 # ------------------------------------------- connector (VM) auth path
@@ -208,6 +235,21 @@ check("connector is scoped to the gateway host",
 out = SCRATCH / "downloaded.db"
 check("download returns True", storage.storage_get("estama.db", out) is True)
 check("download is byte-identical", out.read_bytes() == raw)
+check("verify proves the stored object", storage.storage_verify("estama.db", out) is True)
+
+# A mismatch must say why: a bare False in a cron log hides whether the
+# upload broke or we compared the wrong bytes.
+import contextlib  # noqa: E402
+import io  # noqa: E402
+
+other = SCRATCH / "other.db"
+other.write_bytes(raw + b"\0")
+err = io.StringIO()
+with contextlib.redirect_stderr(err):
+    mismatch_ok = storage.storage_verify("estama.db", other)
+check("verify rejects different content", mismatch_ok is False)
+check("verify explains the mismatch on stderr",
+      "MD5 mismatch" in err.getvalue())
 check("download leaves no .part file",
       not list(out.parent.glob("*.part")))
 check("downloaded DB passes verify_db",
