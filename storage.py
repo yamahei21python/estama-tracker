@@ -240,6 +240,10 @@ def _gw_http(method: str, url: str, data: bytes | None = None,
     from dynamic_credentials import add_surrogate_to_request
 
     req = urllib.request.Request(url, data=data, method=method)
+    # Cloudflare's edge rejects the default Python-urllib User-Agent
+    # with 403 (error 1010) before the Worker runs, so send a
+    # descriptive one (verified live 2026-11-05).
+    req.add_header("User-Agent", "estama-tracker/1.0")
     if content_type:
         req.add_header("Content-Type", content_type)
     host = urllib.parse.urlparse(url).hostname
