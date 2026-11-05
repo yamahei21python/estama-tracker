@@ -36,10 +36,11 @@ CREATE TABLE IF NOT EXISTS snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_cast_date
     ON snapshots (shop_id, cast_name, target_date);
-CREATE INDEX IF NOT EXISTS idx_snapshots_castid_date
-    ON snapshots (shop_id, cast_id, target_date);
-CREATE INDEX IF NOT EXISTS idx_snapshots_status_date
-    ON snapshots (status_norm, target_date);
+-- No (shop_id, cast_id, target_date) index: idx_snapshots_cast_date
+-- already narrows by shop_id and the extra index only cost write time
+-- and ~10MB raw / ~5MB gzipped in the uploaded DB. The same goes for
+-- (status_norm, target_date): status filters always carry a date and
+-- target_date leads idx_snapshots_date_at.
 -- Every chronological query orders by fetched_at; this is the index
 -- that keeps those ORDER BYs from building a temp b-tree.
 CREATE INDEX IF NOT EXISTS idx_snapshots_date_at
@@ -95,6 +96,12 @@ CREATE TABLE IF NOT EXISTS daily_cast_status (
     fetched_at  TEXT,              -- timestamp of the winning observation
     first_sold_out_at TEXT,        -- earliest sold_out fetched_at that day (NULL if never)
     was_low     INTEGER NOT NULL DEFAULT 0,  -- 'low' observed before the sold_out (or at all, if never)
+    -- Observation envelope for the day. Lets the pooled hazard model
+    -- train on this table (which retention keeps for a year) instead of
+    -- the raw snapshots (kept ~2 weeks). NULL on rows rolled up before
+    -- these columns existed and never re-rolled.
+    first_seen_at TEXT,            -- earliest fetched_at that day
+    last_seen_at  TEXT,            -- latest fetched_at that day
     PRIMARY KEY (shop_id, cast_key, target_date)
 );
 

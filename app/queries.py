@@ -79,8 +79,49 @@ def final_rows(conn: sqlite3.Connection, date: str):
 
 
 def _all_dates(conn):
+    """Dates with raw snapshot rows (the short retention window)."""
     return [r[0] for r in conn.execute(
         "SELECT DISTINCT target_date FROM snapshots ORDER BY target_date")]
+
+
+def _daily_dates(conn):
+    """Dates covered by the long-horizon rollup, oldest first.
+
+    daily_cast_status keeps one row per cast-day for a year while raw
+    snapshots are retained ~2 weeks, so sections that answer "what
+    happened over time" must take their date list from here. Dates that
+    exist only in snapshots (a day the rollup has not reached yet) are
+    added so a report never drops today just because the rollup lagged.
+    """
+    try:
+        rows = [r[0] for r in conn.execute(
+            "SELECT DISTINCT target_date FROM daily_cast_status"
+            " ORDER BY target_date")]
+    except sqlite3.OperationalError:
+        rows = []
+    if not rows:
+        return _all_dates(conn)
+    return sorted(set(rows) | set(_all_dates(conn)))
+
+
+def daily_finals(conn, date):
+    """(shop_id, cast_name, cast_id, status_norm) for one cast-day.
+
+    Reads the rollup (full history) and falls back to the R3 window over
+    snapshots when the day was never rolled up. Callers that only need
+    the day's final state should use this instead of _day_finals: the
+    rollup survives snapshot retention."""
+    try:
+        rows = conn.execute(
+            """SELECT shop_id, cast_name, cast_id, status_norm
+               FROM daily_cast_status WHERE target_date = ?""",
+            (date,)).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    if rows:
+        return rows
+    return [(r["shop_id"], r["cast_name"], r["cast_id"], r["status_norm"])
+            for r in _day_finals(conn, date)]
 
 
 def _day_finals(conn, date):
@@ -162,6 +203,7 @@ def shops_with_no_table(conn, date):
 # public aliases: the move kept the original names so callers/tests
 # could be split apart without touching every call site
 all_dates = _all_dates
+all_daily_dates = _daily_dates
 day_finals = _day_finals
 ckey = _ckey
 resolve_cast = _resolve_cast

@@ -37,12 +37,20 @@ def order_plan(conn, sql):
 # ------------------------------------------------------------- fresh DB
 fresh = SCRATCH / "fresh.db"
 con = common.connect_db(str(fresh))
-check("fresh DB user_version = 1",
-      con.execute("PRAGMA user_version").fetchone()[0] == 1)
+check("fresh DB user_version = 2",
+      con.execute("PRAGMA user_version").fetchone()[0] == 2)
 names = index_names(con, "snapshots")
 check("fresh DB has (target_date, fetched_at) index",
       "idx_snapshots_date_at" in names)
-check("fresh DB has cast_id index", "idx_snapshots_castid_date" in names)
+check("fresh DB has shop+name index", "idx_snapshots_cast_date" in names)
+check("fresh DB dropped cast_id index",
+      "idx_snapshots_castid_date" not in names)
+check("fresh DB dropped status index",
+      "idx_snapshots_status_date" not in names)
+daily_cols = {r[1] for r in con.execute(
+    "PRAGMA table_info(daily_cast_status)")}
+check("fresh DB has observation envelope",
+      {"first_seen_at", "last_seen_at"} <= daily_cols)
 check("fresh DB has no fetched_time / work_hours index",
       not {"idx_snapshots_time", "idx_snapshots_work_hours"} & names)
 con.close()
@@ -78,13 +86,15 @@ con.commit()
 con.close()
 
 con = common.connect_db(str(legacy))
-check("legacy DB migrated to user_version 1",
-      con.execute("PRAGMA user_version").fetchone()[0] == 1)
+check("legacy DB migrated to user_version 2",
+      con.execute("PRAGMA user_version").fetchone()[0] == 2)
 names = index_names(con, "snapshots")
 check("legacy DB: old indexes dropped",
       not {"idx_snapshots_time", "idx_snapshots_work_hours"} & names)
-check("legacy DB: new indexes added",
-      {"idx_snapshots_date_at", "idx_snapshots_castid_date"} <= names)
+check("legacy DB: surviving indexes present",
+      {"idx_snapshots_date_at", "idx_snapshots_cast_date"} <= names)
+check("legacy DB: redundant indexes absent",
+      not {"idx_snapshots_castid_date", "idx_snapshots_status_date"} & names)
 check("legacy DB: rows kept",
       con.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0] == 1)
 plan = order_plan(
@@ -99,10 +109,10 @@ con.close()
 
 # idempotency: a second open is a no-op and keeps the version
 con = common.connect_db(str(legacy))
-check("re-open keeps user_version 1",
-      con.execute("PRAGMA user_version").fetchone()[0] == 1)
+check("re-open keeps user_version 2",
+      con.execute("PRAGMA user_version").fetchone()[0] == 2)
 check("re-open keeps index set",
-      {"idx_snapshots_date_at", "idx_snapshots_castid_date"}
+      {"idx_snapshots_date_at", "idx_snapshots_cast_date"}
       <= index_names(con, "snapshots"))
 con.close()
 
@@ -138,8 +148,10 @@ names = index_names(con, "snapshots")
 check("CHECK rebuild: 'dummy' now accepted",
       "dummy" in con.execute(
           "SELECT sql FROM sqlite_master WHERE name='snapshots'").fetchone()[0])
-check("CHECK rebuild: new index set present",
-      {"idx_snapshots_date_at", "idx_snapshots_castid_date"} <= names)
+check("CHECK rebuild: surviving index set present",
+      {"idx_snapshots_date_at", "idx_snapshots_cast_date"} <= names)
+check("CHECK rebuild: redundant indexes absent",
+      not {"idx_snapshots_castid_date", "idx_snapshots_status_date"} & names)
 check("CHECK rebuild: old indexes absent",
       not {"idx_snapshots_time", "idx_snapshots_work_hours"} & names)
 check("CHECK rebuild: rows kept",

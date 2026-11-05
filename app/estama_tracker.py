@@ -44,9 +44,10 @@ from common import (BASE_DIR as BASE, SCHEMA_PATH as SCHEMA,
                     SHOPS_JSON_PATH as DEFAULT_SHOPS, business_date,
                     connect_db, load_json, normalize_status_text,
                     notify_webhook, now_jst)
-from queries import (_all_dates, _ckey, _day_finals, _final_sql,
-                     _resolve_cast, final_rows, shop_areas, shop_names,
-                     shops_with_no_table, sold_out, status_counts)
+from queries import (_all_dates, _ckey, _daily_dates, _day_finals,
+                     _final_sql, _resolve_cast, final_rows, shop_areas,
+                     shop_names, shops_with_no_table, sold_out,
+                     status_counts)
 from analysis import (alert_evidence_lines, rollup_daily,
                       usually_sold_out_alert)
 from report_sections import (
@@ -161,10 +162,15 @@ def _expected_business_date(now):
 def print_report(conn, date=None, min_days=2, threshold=0.6,
                  streak_min=2, top_n=15, evidence=True):
     dates = _all_dates(conn)
-    if not dates:
+    # Summary/streak sections answer "what happened over time" and must
+    # span the rollup (a year), not the raw-snapshot retention window.
+    # _daily_dates already falls back to snapshots when the rollup is
+    # empty, so this is also the right emptiness check.
+    hist_dates = _daily_dates(conn)
+    if not hist_dates:
         print("report: snapshots が空です")
         return
-    date = date or dates[-1]
+    date = date or (dates or hist_dates)[-1]
 
     def head(t):
         print("\n" + "=" * 70)
@@ -175,10 +181,10 @@ def print_report(conn, date=None, min_days=2, threshold=0.6,
     for line in section_monitor(conn, date):
         print(line)
     head("【1】日次サマリー（R3最終状態）")
-    for line in section_daily(conn, dates):
+    for line in section_daily(conn, hist_dates):
         print(line)
     head(f"【2】完売ストリーク（{streak_min}日連続以上）")
-    for line in section_streaks(conn, dates, streak_min):
+    for line in section_streaks(conn, hist_dates, streak_min):
         print(line)
     head(f"【3】アラート: 普段完売なのに{date}は空き"
          f"（min_days={min_days}, threshold={threshold}）")

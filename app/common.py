@@ -31,7 +31,10 @@ from zoneinfo import ZoneInfo
 JST = ZoneInfo("Asia/Tokyo")
 
 # Bumped by _migrate_schema; stored in PRAGMA user_version.
-SCHEMA_VERSION = 1
+# 1: retire pre-fetched_at indexes.
+# 2: drop the two redundant snapshots indexes; add the daily
+#    observation-envelope columns (first_seen_at / last_seen_at).
+SCHEMA_VERSION = 2
 
 # The site flips its business date around 05:00-06:00; everything newer
 # than 06:00 JST belongs to that calendar date's business day.
@@ -129,8 +132,52 @@ def _migrate_schema(conn) -> None:
         # checkpoint label the scraper dedupes on.
         conn.execute("DROP INDEX IF EXISTS idx_snapshots_time")
         conn.execute("DROP INDEX IF EXISTS idx_snapshots_work_hours")
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        conn.commit()
+        version = 1
+    if version < 2:
+        # v2: two snapshots indexes duplicated coverage that
+        # idx_snapshots_cast_date / idx_snapshots_date_at already give
+        # (see schema.sql). Together they were 10.7MB + 10.1MB raw and
+        # ~6MB of the gzipped upload; dropping them costs a TEMP B-TREE
+        # on the shop+cast_id lookup and a full scan on a status-only
+        # filter, both negligible at the retained row count.
+        conn.execute("DROP INDEX IF EXISTS idx_snapshots_castid_date")
+        conn.execute("DROP INDEX IF EXISTS idx_snapshots_status_date")
+        _add_daily_envelope_columns(conn)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    conn.commit()
+
+
+def _add_daily_envelope_columns(conn) -> None:
+    """Add and backfill daily_cast_status.first_seen_at / last_seen_at.
+
+    Idempotent: a DB whose schema.sql creation already includes the
+    columns only needs the backfill. The backfill can only run while the
+    matching snapshots still exist, which is why it happens here (once)
+    rather than lazily.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(daily_cast_status)")}
+    if not cols:
+        return  # table absent (old/partial DB) - nothing to upgrade
+    for col in ("first_seen_at", "last_seen_at"):
+        if col not in cols:
+            conn.execute(
+                f"ALTER TABLE daily_cast_status ADD COLUMN {col} TEXT")
+    conn.execute(
+        """UPDATE daily_cast_status AS d
+              SET first_seen_at = (
+                    SELECT MIN(s.fetched_at) FROM snapshots s
+                     WHERE s.shop_id = d.shop_id
+                       AND s.target_date = d.target_date
+                       AND CAST(COALESCE(s.cast_id, s.cast_name) AS TEXT)
+                           = d.cast_key),
+                  last_seen_at = (
+                    SELECT MAX(s.fetched_at) FROM snapshots s
+                     WHERE s.shop_id = d.shop_id
+                       AND s.target_date = d.target_date
+                       AND CAST(COALESCE(s.cast_id, s.cast_name) AS TEXT)
+                           = d.cast_key)
+            WHERE d.first_seen_at IS NULL""")
+    conn.commit()
 
 
 def _migrate_reclassify_decoy(conn) -> None:
@@ -209,10 +256,6 @@ def _migrate_status_norm_dummy(conn) -> None:
         ALTER TABLE snapshots_new RENAME TO snapshots;
         CREATE INDEX IF NOT EXISTS idx_snapshots_cast_date
             ON snapshots (shop_id, cast_name, target_date);
-        CREATE INDEX IF NOT EXISTS idx_snapshots_castid_date
-            ON snapshots (shop_id, cast_id, target_date);
-        CREATE INDEX IF NOT EXISTS idx_snapshots_status_date
-            ON snapshots (status_norm, target_date);
         CREATE INDEX IF NOT EXISTS idx_snapshots_date_at
             ON snapshots (target_date, fetched_at);
         """
