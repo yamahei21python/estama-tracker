@@ -10,6 +10,13 @@ to exactly one backend, selected at call time:
   remote blob SHA against the locally computed git blob SHA of the
   compressed bytes - stronger than a size check.
 - Cloudflare R2 via boto3 when ESTAMA_R2_* env vars are set.
+- Cloudflare R2 behind a Worker gateway: when storage.json says
+  {"backend": "gateway", "gateway_base": "https://...workers.dev"},
+  objects are stored under their key (the Worker maps the URL path
+  to the R2 key), with .db objects gzip-compressed exactly like the
+  GitHub backend - the raw DB (106 MB on 2026-11-05) would exceed the
+  Workers 100 MB request-body limit uncompressed. Auth rides the
+  custom.estama-r2 connector surrogate, so no token sits on this VM.
 - Otherwise a local mirror directory (BASE/r2_local/).
 
 runner.py does the DB-side work (verify, snapshot, upload, archive);
@@ -25,6 +32,8 @@ import json
 import os
 import shutil
 import sys
+import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -70,6 +79,8 @@ def storage_config() -> dict:
 def backend_name() -> str:
     if storage_config().get("backend") == "github":
         return "github"
+    if storage_config().get("backend") == "gateway":
+        return "gateway"
     if r2_configured():
         return "R2"
     return "local-mirror"
@@ -188,12 +199,126 @@ def _gh_delete(key: str) -> None:
                  "sha": None}], f"data: delete {key}")
 
 
+# ------------------------------------------------- Worker gateway backend --
+# Objects live in an R2 bucket behind a Cloudflare Worker. The Worker
+# checks a Bearer token (its GATEWAY_TOKEN secret) and maps the URL path
+# to the R2 key. Auth: the custom.estama-r2 connector surrogate, swapped
+# for the real token on egress to the Worker host (same mechanics as the
+# GitHub backend), so the token itself never sits on this VM. The Worker
+# base URL is not secret and lives in storage.json as gateway_base.
+# There is no server-side copy - upload_db writes the live key directly,
+# as with every other backend.
+
+GW_CONNECTOR = "custom.estama-r2"
+
+
+def gw_path(key: str) -> str:
+    if key.endswith(".db"):
+        return key + ".gz"
+    return key
+
+
+def _gw_payload(local_file: Path, key: str) -> bytes:
+    data = local_file.read_bytes()
+    if gw_path(key) != key:
+        data = gzip.compress(data, mtime=0)
+    return data
+
+
+def _gw_base() -> str:
+    return storage_config().get("gateway_base", "").rstrip("/")
+
+
+def _gw_url(key: str) -> str:
+    return _gw_base() + "/" + urllib.parse.quote(key, safe="/")
+
+
+def _gw_http(method: str, url: str, data: bytes | None = None,
+             content_type: str | None = None,
+             timeout: int = 180) -> tuple[int, dict, bytes]:
+    sys.path.insert(0, GH_CRED_LIB)
+    from dynamic_credentials import add_surrogate_to_request
+
+    req = urllib.request.Request(url, data=data, method=method)
+    if content_type:
+        req.add_header("Content-Type", content_type)
+    host = urllib.parse.urlparse(url).hostname
+    add_surrogate_to_request(req, GW_CONNECTOR, allowed_hosts=[host])
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, dict(resp.headers), resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers or {}), e.read() if e.fp else b""
+
+
+def _gw_put(key: str, local_file: Path) -> None:
+    status, _, _ = _gw_http("PUT", _gw_url(gw_path(key)),
+                            data=_gw_payload(local_file, key),
+                            content_type="application/octet-stream")
+    if status not in (200, 201, 204):
+        raise IOError(f"gateway PUT {key} -> HTTP {status}")
+
+
+def _gw_head(key: str) -> tuple[int | None, str | None] | None:
+    """(size, etag) of the stored object; None when it does not exist.
+
+    The size comes from X-Object-Size: a Content-Length set by the
+    Worker itself is ignored by the Workers runtime, so the gateway
+    returns the size in a custom header (Content-Length is kept only
+    as a fallback). The etag is R2's httpEtag - the object MD5 for
+    non-multipart uploads - stripped of its quotes.
+    """
+    status, headers, _ = _gw_http("HEAD", _gw_url(gw_path(key)))
+    if status != 200:
+        return None
+    h = {k.lower(): v for k, v in headers.items()}
+    raw = h.get("x-object-size") or h.get("content-length")
+    try:
+        size = int(raw) if raw is not None else None
+    except ValueError:
+        size = None
+    etag = h.get("etag")
+    if etag:
+        etag = etag.strip()
+        if etag.startswith("W/"):
+            etag = etag[2:]
+        etag = etag.strip('"').lower() or None
+    return size, etag
+
+
+def _gw_size(key: str) -> int | None:
+    head = _gw_head(key)
+    return head[0] if head is not None else None
+
+
+def _gw_verify(key: str, local_file: Path) -> bool:
+    """Content proof for the gateway: the payload's MD5 must equal the
+    ETag the Worker reports. Falls back to a size comparison when the
+    Worker returns no ETag."""
+    payload = _gw_payload(local_file, key)
+    head = _gw_head(key)
+    if head is None:
+        return False
+    size, etag = head
+    if etag:
+        return etag == hashlib.md5(payload).hexdigest()
+    return size == len(payload)
+
+
+def _gw_delete(key: str) -> None:
+    status, _, _ = _gw_http("DELETE", _gw_url(gw_path(key)))
+    if status not in (200, 204, 404):
+        raise IOError(f"gateway DELETE {key} -> HTTP {status}")
+
+
 # ------------------------------------------------------------ dispatch ----
 
 def storage_put(key: str, local_file: Path) -> None:
     b = backend_name()
     if b == "github":
         _gh_put(key, local_file)
+    elif b == "gateway":
+        _gw_put(key, local_file)
     elif b == "R2":
         _s3().upload_file(str(local_file), os.environ["ESTAMA_R2_BUCKET"], key)
     else:
@@ -207,6 +332,11 @@ def storage_size(key: str) -> int | None:
     if b == "github":
         try:
             return _gh_size(key)
+        except Exception:
+            return None
+    if b == "gateway":
+        try:
+            return _gw_size(key)
         except Exception:
             return None
     if b == "R2":
@@ -226,6 +356,11 @@ def storage_verify(key: str, local_file: Path) -> bool:
             return _gh_verify(key, local_file)
         except Exception:
             return False
+    if backend_name() == "gateway":
+        try:
+            return _gw_verify(key, local_file)
+        except Exception:
+            return False
     return storage_size(key) == local_file.stat().st_size
 
 
@@ -233,6 +368,8 @@ def storage_delete(key: str) -> None:
     b = backend_name()
     if b == "github":
         _gh_delete(key)
+    elif b == "gateway":
+        _gw_delete(key)
     elif b == "R2":
         _s3().delete_object(Bucket=os.environ["ESTAMA_R2_BUCKET"], Key=key)
     else:
