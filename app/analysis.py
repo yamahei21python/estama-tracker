@@ -107,6 +107,12 @@ def rollup_daily(conn, date=None):
         conn.execute(
             "ALTER TABLE daily_cast_status"
             " ADD COLUMN was_low INTEGER NOT NULL DEFAULT 0")
+    if "first_seen_at" not in cols:
+        conn.execute(
+            "ALTER TABLE daily_cast_status ADD COLUMN first_seen_at TEXT")
+    if "last_seen_at" not in cols:
+        conn.execute(
+            "ALTER TABLE daily_cast_status ADD COLUMN last_seen_at TEXT")
 
     if date:
         days = [date]
@@ -135,19 +141,34 @@ def rollup_daily(conn, date=None):
                    GROUP BY 1, 2""", (d,)).fetchall():
             so_at = first_so.get(f"{s}|{k}")
             low_seen[f"{s}|{k}"] = so_at is None or fa < so_at
+        # Observation envelope: min/max fetched_at for the cast-day. The
+        # pooled hazard model reads these so it can train on
+        # daily_cast_status (kept 365d) instead of snapshots (kept ~15d).
+        seen = {}
+        for s, k, first_at, last_at in conn.execute(
+                """SELECT shop_id,
+                          CAST(COALESCE(cast_id, cast_name) AS TEXT),
+                          MIN(fetched_at), MAX(fetched_at)
+                   FROM snapshots WHERE target_date = ?
+                   GROUP BY 1, 2""", (d,)).fetchall():
+            seen[f"{s}|{k}"] = (first_at, last_at)
         conn.execute(
             "DELETE FROM daily_cast_status WHERE target_date = ?", (d,))
         conn.executemany(
             """INSERT INTO daily_cast_status
                (shop_id, cast_key, cast_id, cast_name, target_date,
                 status_norm, status_raw, work_hours, age, fetched_at,
-                first_sold_out_at, was_low)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                first_sold_out_at, was_low, first_seen_at, last_seen_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [(r[0], str(r[7] if r[7] is not None else r[1]), r[7], r[1],
               r[2], r[3], r[4], r[6], r[9], r[8],
               first_so.get(f"{r[0]}|{r[7] if r[7] is not None else r[1]}"),
               1 if low_seen.get(
-                  f"{r[0]}|{r[7] if r[7] is not None else r[1]}") else 0)
+                  f"{r[0]}|{r[7] if r[7] is not None else r[1]}") else 0,
+              seen.get(f"{r[0]}|{r[7] if r[7] is not None else r[1]}",
+                       (None, None))[0],
+              seen.get(f"{r[0]}|{r[7] if r[7] is not None else r[1]}",
+                       (None, None))[1])
              for r in rows],
         )
         # forecast self-score: of the day's was_low casts, how many sold

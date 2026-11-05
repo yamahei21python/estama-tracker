@@ -14,8 +14,9 @@ from datetime import datetime, timedelta
 from common import (BASE_DIR as BASE, business_date, business_day_start,
                     load_json, now_jst)
 from analysis import alert_evidence_lines, usually_sold_out_alert
-from queries import (_all_dates, _ckey, _day_finals, _final_sql,
-                     _resolve_cast, shop_areas, shop_names, status_counts)
+from queries import (_all_dates, _ckey, _daily_dates, _day_finals,
+                     _final_sql, _resolve_cast, daily_finals, shop_areas,
+                     shop_names, status_counts)
 
 FLIP_HOUR = 6
 SELLOUT_HORIZON_HOURS = 4
@@ -64,12 +65,15 @@ th { color: #8b93a7; font-weight: 600; font-size: 11px; }
 
 
 def section_daily(conn, dates):
-    """Per-day R3 final-state counts with sold-out rate."""
+    """Per-day R3 final-state counts with sold-out rate.
+
+    Reads the rollup so the summary keeps covering the full history
+    after raw snapshots are pruned; falls back to the snapshot window
+    for days that were never rolled up."""
     lines = []
     expected = business_date(now_jst())
     for d in dates:
-        rows = _day_finals(conn, d)
-        c = Counter(r["status_norm"] for r in rows)
+        c = Counter(r[3] for r in daily_finals(conn, d))
         n = sum(c.values())
         so = c.get("sold_out", 0)
         mark = "  <- 巡回中" if d == expected else ""
@@ -93,10 +97,10 @@ def section_streaks(conn, dates, streak_min=2):
     by_cast = {}
     names = {}
     for d in dates:
-        for r in _day_finals(conn, d):
-            k = (r["shop_id"], _ckey(r))
-            by_cast.setdefault(k, {})[d] = r["status_norm"]
-            names[k] = (r["cast_name"], r["cast_id"])
+        for shop_id, cast_name, cast_id, status_norm in daily_finals(conn, d):
+            k = (shop_id, str(cast_id) if cast_id is not None else cast_name)
+            by_cast.setdefault(k, {})[d] = status_norm
+            names[k] = (cast_name, cast_id)
     lines = []
     for k, m in by_cast.items():
         streak = 0
@@ -413,7 +417,35 @@ def pooled_sellout_hazard(conn, date):
     in [b, last observation] and had not sold out before b; the event
     lands in the bucket where its first sold_out observation falls.
     Returns (events: Counter, at_risk: Counter).
+
+    Trains on daily_cast_status (one row per cast-day, kept a year)
+    using the first_seen_at/last_seen_at envelope; falls back to raw
+    snapshots for DBs that predate those columns or have no rollup.
     """
+    cols = {r[1] for r in conn.execute(
+        "PRAGMA table_info(daily_cast_status)")}
+    if {"first_seen_at", "last_seen_at"} <= cols:
+        rows = conn.execute(
+            """SELECT first_seen_at, last_seen_at, first_sold_out_at
+               FROM daily_cast_status
+               WHERE target_date < ?
+                 AND first_seen_at IS NOT NULL
+                 AND last_seen_at IS NOT NULL""", (date,)).fetchall()
+        if rows:
+            events, at_risk = Counter(), Counter()
+            for first_at, last_at, so_at in rows:
+                lo = _bd_hour(first_at[11:16])
+                hi = _bd_hour(last_at[11:16])
+                if lo is None or hi is None or hi < lo:
+                    continue
+                so = _bd_hour(so_at[11:16]) if so_at else None
+                for b in range(lo, hi + 1):
+                    if so is None or so >= b:
+                        at_risk[b] += 1
+                if so is not None:
+                    events[so] += 1
+            return events, at_risk
+
     rows = conn.execute(
         """SELECT shop_id, CAST(COALESCE(cast_id, cast_name) AS TEXT),
                   target_date, fetched_time, status_norm
@@ -450,15 +482,19 @@ def _forecast_watch(conn):
 
 
 def _forecast_history(conn, date):
-    """{(shop_id, cast_key): [sold_days, observed_days]} before `date`."""
+    """{(shop_id, cast_key): [sold_days, observed_days]} before `date`.
+
+    Uses the rollup so the forecast keeps a full year of history after
+    raw snapshots are pruned (only ~2 weeks are retained)."""
     hist = {}
-    for d in _all_dates(conn):
+    for d in _daily_dates(conn):
         if d >= date:
             continue
-        for r in _day_finals(conn, d):
-            h = hist.setdefault((r["shop_id"], _ckey(r)), [0, 0])
+        for shop_id, cast_name, cast_id, status_norm in daily_finals(conn, d):
+            key = (shop_id, str(cast_id) if cast_id is not None else cast_name)
+            h = hist.setdefault(key, [0, 0])
             h[1] += 1
-            h[0] += r["status_norm"] == "sold_out"
+            h[0] += status_norm == "sold_out"
     return hist
 
 
@@ -781,9 +817,19 @@ def section_new_casts(conn, date, transfer_days=14):
     """New cast_ids first observed on `date` + cast_ids seen under
     more than one shop in the recent window (possible transfers)."""
     lines = []
-    first_seen = dict(conn.execute(
-        """SELECT CAST(COALESCE(cast_id, cast_name) AS TEXT),
-                  MIN(target_date) FROM snapshots GROUP BY 1"""))
+    # first_seen must come from the rollup: snapshots only cover the
+    # retention window, and a 15-day history would flag every long-time
+    # cast as "new" (measured: 199 vs the correct 162 on 2026-11-05).
+    try:
+        first_seen = dict(conn.execute(
+            """SELECT cast_key, MIN(target_date)
+               FROM daily_cast_status GROUP BY 1"""))
+    except sqlite3.OperationalError:
+        first_seen = {}
+    if not first_seen:
+        first_seen = dict(conn.execute(
+            """SELECT CAST(COALESCE(cast_id, cast_name) AS TEXT),
+                      MIN(target_date) FROM snapshots GROUP BY 1"""))
     # one row per (shop, cast_key); a mid-day rename must not count
     # the same cast_id twice - keep the latest observed name
     latest = {}
@@ -917,6 +963,12 @@ def section_coverage(conn, dates):
             lines.append(f"    同一時間帯の重複巡回: {dup}件")
 
     # shops with anomalously few scrape-hours on the latest day
+    if not dates:
+        # Raw snapshots are gone (retention window shorter than the
+        # rollup, or a manual delete). Coverage is snapshot-only, so
+        # say so instead of crashing the whole report.
+        lines.append("  snapshots が空のため coverage を算出できません")
+        return lines
     d = dates[-1]
     stale = _low_coverage_shops(conn, d)
     if stale:
