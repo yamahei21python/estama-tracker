@@ -5,7 +5,7 @@
 | ドキュメント | 内容 |
 |---|---|
 | [app/README.md](app/README.md) | 詳細仕様（コマンド・分析機能・データの注意点の全項目） |
-| [app/RUNBOOK.md](app/RUNBOOK.md) | VM での1コマンド運用（セットアップ・cron・障害時） |
+| [app/RUNBOOK.md](app/RUNBOOK.md) | 運用手順（セットアップ・cron・障害時・GHA 代走） |
 | [INTEGRATION_DESIGN.md](INTEGRATION_DESIGN.md) | 口コミ/爆サイ連携の設計メモ（帰属ルール・表示専用の境界） |
 
 ## 全体像
@@ -18,59 +18,66 @@ estama.jp 出勤表 ──(estama_scraper.py)──> estama.db: snapshots / slot
 爆サイ.com ──(bakusai.py)──> bakusai.db ─────┤
 口コミDB (kagawa_menes.db) ─────────────────┘──> evidence.py（alert の根拠表示のみ）
 
-runner.py = 巡回・取込・検証・日次アーカイブ・data ブランチへの publish
+runner.py = 巡回・取込・検証・日次アーカイブ・R2 への publish
 ```
+
+**状態は R2 に1つだけ**（`estama.db`）。VM も GitHub Actions もその1オブジェクトを
+「GET → job → PUT」するだけで、ローカルに状態を持たない。
 
 - **取り込み**: ウォッチリスト `app/shops.json`（74店）の当日分を巡回して `snapshots` に追記。`snapshots` は不変で、30分枠の状態変化だけを別テーブル `slot_events` にイベントとして記録する
 - **分析**: 完売一覧・完売率・ストリーク・勢い（枠消化）・完売スピード・エリア/店舗傾向・ランキング照合
 - **予測**: 時間帯別 pooled hazard ＋ キャスト自身の完売ベースラインから「4時間以内に完売する確率」
 - **根拠**: alert に口コミ・爆サイ・枠消失時刻・出典URLを添える（表示専用。判定計算には使わない）
-- **監視**: 取得失敗率・0行店・checkpoint 欠損・枠イベント取得率を日次レポート冒頭で警告
-- **配信**: DB は `storage.json` の設定先（現在は GitHub `data` ブランチ、次ゴールで R2）へ **1実行1コミット** で publish。HTML ダッシュボードと push 通知も生成できる
+- **監視**: 取得失敗率・0行店・checkpoint 欠損・枠イベント取得率を日次レポート冒頭で警告。加えて R2 の `status/last_ok.json`（heartbeat）で「最後に成功したのはいつか」を外から見られる
+- **配信**: DB は `storage.json` の設定先（現在は **R2 + Worker gateway**）へ1実行1回で publish。HTML ダッシュボードと push 通知も生成できる
 
 ## リポジトリ構成
 
 | パス | 役割 |
 |---|---|
-| `runner.py` | 運用ランナー。ロック・DB検証・アーカイブ・publish・`run_log` |
-| `storage.py` | 保存バックエンド（GitHub data ブランチ／Cloudflare R2／ローカルミラー）。書込み後の検証・復元用ヘルパー |
+| `runner.py` | 運用ランナー。ロック・DB検証・pull/guard・アーカイブ・publish・heartbeat・`run_log` |
+| `storage.py` | 保存バックエンド（**R2 gateway**／GitHub data ブランチ／ローカルミラー）。取得・書込み後の検証・復元 |
+| `cloudflare/gateway-worker.js` | R2 を HTTP に落とす Worker。Bearer 認証、PUT/GET/HEAD/DELETE、`POST /__copy` |
+| `.github/workflows/collect.yml` | ステートレス実行（手動 dispatch のみ。`mode` は primary / backup） |
+| `.github/workflows/ci.yml` | テスト（全27ファイル） |
 | `app/estama_scraper.py` | 出勤表の巡回・`snapshots`/`slot_events` への取込・完売スピード分析 |
 | `app/ranking_scraper.py` | 週間人気ランキング（14エリア×30人）取得・`cast_rankings` 保存・ウォッチリスト同期 |
-| `app/estama_tracker.py` | 分析 CLI（report / alert / sellout-forecast / monitor / notify / dashboard / cast）。解析とディスパッチのみで、計算と整形は下の3モジュール |
+| `app/estama_tracker.py` | 分析 CLI（report / alert / sold-out / counts / sellout-forecast / monitor / notify / dashboard / cast / status）。解析とディスパッチのみ |
 | `app/queries.py` | R3 最終状態のSQL・日付/キャストキー解決・店名/エリア参照など、分析側の共通クエリ |
 | `app/analysis.py` | アラート判定（普段完売なのに空き）・根拠行・`daily_cast_status` ロールアップ |
 | `app/report_sections.py` | レポート各節・完売予測・監視・notify・HTML ダッシュボードの生成 |
+| `app/retention.py` | ライブ DB の保持期間剪定 + VACUUM（rollup/アーカイブを前提に安全側で止まる） |
 | `app/bakusai.py` | 爆サイ.com のスレッド発見・本文取得（専用 DB `bakusai.db`、VMローカル） |
 | `app/evidence.py` | alert の根拠表示（口コミ・爆サイ・枠消失・出典URL。表示専用） |
 | `app/common.py` | 共通部品（パス、UA、セッション、DB接続、ステータス正規化、`parse_clock` など） |
 | `app/schema.sql` | スキーマ（`shops` / `snapshots` / `cast_rankings` / `daily_cast_status` / `run_log` / `scrape_log` / `forecast_eval` / `slot_events` / `cast_watch`） |
-| `app/shops.json` | 巡回対象のウォッチリスト |
-| `app/deep_shops.json` | deep tier（爆サイでスレッドが確認できた店だけの固定リスト。口コミ順位で埋めない） |
-| `tests/` | テスト（22ファイル、外部通信なし。import に requests / beautifulsoup4 が必要） |
+| `app/shops.json` | 巡回対象のウォッチリスト（74店） |
+| `app/deep_shops.json` | deep tier（爆サイでスレッドが確認できた店だけの固定リスト、40店。口コミ順位で埋めない） |
+| `tests/` | テスト（27ファイル、外部通信なし。import に requests / beautifulsoup4 が必要） |
 | `scripts/oneoff/` | 退役した一回限りの分析スクリプト（本体 `app/` からは参照されない） |
 
-DB（`*.db`）と `storage.json`、`banned_shops.json`、`dashboard.html`、`logs/`、`staging/`、`r2_local/` はランタイム成果物のため git 管理外。`bakusai.db` は VM ローカルの別 DB で、data ブランチにも上げない。`.perch/mcp.json`（ローカルCLI設定・認証情報を含み得る）も管理外。
+DB（`*.db`）と `storage.json`、`banned_shops.json`、`dashboard.html`、`logs/`、`staging/`、`r2_local/` はランタイム成果物のため git 管理外。`bakusai.db` は VM ローカルの別 DB で、R2 にも上げない。`.perch/mcp.json`（ローカルCLI設定・認証情報を含み得る）も管理外。
 
 ## クイックスタート（ローカル）
 
 ```bash
 python3 -m venv venv
-./venv/bin/pip install requests beautifulsoup4        # R2 を使う場合のみ boto3
+./venv/bin/pip install requests beautifulsoup4        # R2 を boto3 で直叩きする場合のみ boto3
 
 # スキーマ適用（冪等。CREATE IF NOT EXISTS + PRAGMA user_version の順序付き移行）
 ./venv/bin/python app/estama_tracker.py verify --db app/estama.db
 
-# 1店だけ取得して取り込み（既定: 40900 SUPER AKUMA GIRLS）
+# 1店だけ取得して取り込み
 ./venv/bin/python app/estama_scraper.py --shop-id 40900 --import-db
 
 # 全店巡回（当日分のみ）
 ./venv/bin/python app/estama_scraper.py --all-shops --import-db
 
 # 全セクション分析（冒頭に監視警告）
-./venv/bin/python app/estama_tracker.py report --date 2026-10-30
+./venv/bin/python app/estama_tracker.py report --date 2026-11-05
 ```
 
-- 保存先は `storage.json`（VM 側、リポジトリには含めない）で切り替える。`github`（`data` ブランチに gzip 保存）／R2／未設定なら `r2_local/` へのローカルミラー
+- 保存先は `storage.json`（VM 側、リポジトリには含めない）で切り替える。`gateway`（R2、`.db` は gzip）／`github`（`data` ブランチに gzip）／未設定なら `r2_local/` へのローカルミラー
 - 爆サイを使う場合は専用 DB を初期化する: `./venv/bin/python app/bakusai.py init`
 
 ## 主要コマンド
@@ -87,6 +94,8 @@ python3 -m venv venv
 | 爆サイ | `app/bakusai.py discover` / `crawl --deep app/deep_shops.json` / `status` |
 | 通知・ダッシュボード | `app/estama_tracker.py notify` / `dashboard --out dashboard.html` |
 | 個別キャスト | `app/estama_tracker.py cast --shop-id X --cast-id Y` |
+| ライブ DB の取得 | `runner.py pull`（ステートレス実行用） |
+| 代走の判断 | `runner.py guard --max-age 90`（fresh=exit 0 / stale=exit 3） |
 
 ### 予測・根拠・監視の要点
 
@@ -95,22 +104,33 @@ python3 -m venv venv
 - **evidence**: 口コミ n件・スコア・タグ2つ（取得日付き）、爆サイ返信の最終投稿と引用、枠の消失時刻、出典URL。**表示専用**で、完全名一致＋店舗紐付け信頼度 0.8 以上のみ（伏せ字は候補保存だけで自動確定しない）
 - **monitor**: `run_log` / `scrape_log` / `slot_events` を突き合わせ、checkpoint 未達・runner 滞留・店別 fail 率・0行店・枠イベント取得率を先頭に出す
 
-## 運用（VM）
+## ストレージ（R2 + Worker gateway）
 
-実行は Muse の VM、閲覧・分析は Mac。cron は以下（詳細は [app/RUNBOOK.md](app/RUNBOOK.md)）:
+`storage.json`（VM ローカル、git 管理外）:
 
-| 時刻 | コマンド |
-|---|---|
-| 毎時 :30 | `./venv/bin/python runner.py checkpoint` |
-| 毎日 06:15 | `./venv/bin/python runner.py ranking` |
-| 毎日 05:10 | `./venv/bin/python app/bakusai.py crawl --deep app/deep_shops.json` |
-| 毎日 06:35 | `./venv/bin/python app/estama_tracker.py monitor` |
+```json
+{
+  "backend": "gateway",
+  "gateway_base": "https://estama-r2.<account>.workers.dev",
+  "db_retention": { "...": "下記" }
+}
+```
 
-publish は1実行1コミット。書込み直後に blob SHA を照合し、不一致なら1回だけ再送、それでも不一致なら前の blob に戻す（前版が無ければキーを削除）。壊れた DB が最新版を潰さない。publish が失敗した実行は `run_log` を `fail` にして runner が exit 1 する（cron 側で気づける）。
+Worker の契約（`cloudflare/gateway-worker.js`）:
 
-日次アーカイブは「閉じた営業日」（期待営業日の前日）をキーに `archive/estama-<営業日>.db` を1回だけ保存する。サイトが最終チェックポイントより先に日付を切り替えても取り逃さず、アーカイブ失敗時は checkpoint/ranking を止めずに次回再試行する（検証不成立のキーは削除）。
+| メソッド | パス | 動作 |
+|---|---|---|
+| `PUT` | `/<key>` | ボディをそのまま R2 に保存 |
+| `GET` | `/<key>` | オブジェクトを返す（無ければ 404） |
+| `HEAD` | `/<key>` | `X-Object-Size` + ETag（オブジェクト MD5） |
+| `DELETE` | `/<key>` | 削除（冪等、無くても 204） |
+| `POST` | `/__copy` | `{"src","dst"}` のサーバ側コピー |
 
-保持ポリシーは `storage.json` の `{"archive_retention": {"days": 30, "weekly": true}}` で有効化する（未設定なら削除しない）。直近30日は日次で残し、それ以前は月曜分のみ残す。publish 成功後に best-effort で実行され、日付を解釈できないキーには触れない。
+- **認証は Bearer のみ**。`GATEWAY_TOKEN` が環境変数にあれば直送（GitHub Actions）、無ければ `custom.estama-r2` connector が egress 時に付与（VM。トークンをディスクに置かない）。未設定の Worker は fail-closed で 401
+- **`.db` は gzip で送る**（`estama.db.gz`）。生の 110MB は Workers のリクエスト上限 100MB を超えるため。実測 2026-11-05: raw 110,915,584B → gz 15,580,651B
+- **検証**: PUT 直後に HEAD の ETag（= 送った payload の MD5）と突き合わせ、不一致なら1回だけ再送する。それでも不一致なら失敗で止まる（gateway には前版へ戻す手段が無い）
+- gzip ヘッダの OS バイトは 0x03 に固定（`gz_deterministic`）。固定しないと、Linux が書いたオブジェクトを macOS が再圧縮したときに MD5 だけが変わり、内容は正しいのに検証が落ちる
+- `storage_get` は gateway とローカルミラーのみ対応（GitHub バックエンドはトークンを VM に置かない設計のため対象外）
 
 ## DB 容量（ライブ DB の保持）
 
@@ -128,27 +148,47 @@ Worker の受信上限が 100MB（gzip 後）なので、ライブ DB は保持�
 ```
 
 - 生 `snapshots` は intraday 用なので15日。長期の履歴は `daily_cast_status`（1 cast-day 1行、約96%小さい）が365日保持する
-- `slot_events`（30分枠の遷移）は自己完結なので30日
-- `scrape_log` は運用監査のみなので90日
-- 定常は約60MB（100MBの60%）。アーカイブ（R2）が raw の正なので、`_db_retention_best_effort` は直近のアーカイブが2日以上滞っていると削除しない
-- 生スナップショットは **rollup 済みの日だけ** 削除する（rollup 未実行なら残す）。削除できなかった日は `db retention: kept unrolled snapshot days ...` としてログに出て、次回の rollup 成功で解消する
-- 設定値が壊れている場合（例 `"15d"`）はそのテーブルを無効化する（既定値へ丸めない）
-- 併せて、重複していた `idx_snapshots_castid_date` / `idx_snapshots_status_date` を廃止（gzip で約6MB削減）し、削除後は VACUUM する
+- `slot_events`（30分枠の遷移）は自己完結なので30日、`scrape_log` は運用監査のみなので90日
+- アーカイブ（R2 の `archive/estama-<営業日>.db`）が raw の正なので、直近のアーカイブが2日以上滞っていると削除しない
+- 生スナップショットは **rollup 済みの日だけ** 削除する。削除できなかった日は `db retention: kept unrolled snapshot days ...` としてログに出て、次回の rollup 成功で解消する
+- 設定値が壊れている場合（例 `"15d"`）はそのテーブルを無効化する（既定値へ丸めない）。削除後は VACUUM する
+- **GHA が生成する `storage.json` には `db_retention` が無い**（VM の値と食い違うと保持期間が壊れるため、意図的に未設定）。GHA を主系にする際に入れる → issue #21
 
 日次サマリー・完売ストリーク・予測履歴・新規cast判定・hazard は `daily_cast_status` を読むため、生スナップショットを剪定しても全期間を維持する。
 
+## 運用
+
+実行は Muse の VM、閲覧・分析は Mac。cron（詳細は [app/RUNBOOK.md](app/RUNBOOK.md)）:
+
+| 時刻 | コマンド |
+|---|---|
+| 毎時 :30 | `./venv/bin/python runner.py checkpoint` |
+| 毎日 06:15 | `./venv/bin/python runner.py ranking` |
+| 毎日 05:10 | `./venv/bin/python app/bakusai.py crawl --deep app/deep_shops.json` |
+| 毎日 06:35 | `./venv/bin/python app/estama_tracker.py monitor` |
+
+publish の安全策:
+
+- 書込み直後に MD5（ETag）を照合し、不一致なら1回だけ再送する。それでも一致しなければ **失敗として止まる**（`run_log` は `fail`、exit 1）。GitHub バックエンドのみ前の blob に戻す／前版が無ければキーを削除する。壊れた DB が最新版を潰さない
+- publish が失敗した実行は `run_log` を `fail` にして runner が exit 1 する（cron 側で気づける）
+- job の冒頭で `status/last_ok.json` を読み、**自分より新しい成功があれば先に pull** してから走る（代走分の行を上書きしない）
+- publish の直前にもう一度 heartbeat を見て、**自分の開始後に他者が公開していたら上書きを拒否**する（1時間の欠落で済む）
+- 成功したら `run_log` と同じ `finished_at` で heartbeat を書く（失敗してもジョブは赤くしない）
+
+日次アーカイブは「閉じた営業日」（期待営業日の前日）をキーに `archive/estama-<営業日>.db` を1回だけ保存する。サイトが最終チェックポイントより先に日付を切り替えても取り逃さず、アーカイブ失敗時は checkpoint/ranking を止めずに次回再試行する（検証不成立のキーは削除）。
+
+アーカイブ保持は `{"archive_retention": {"days": 30, "weekly": true}}` で有効化する（未設定なら削除しない）。直近30日は日次で残し、それ以前は月曜分のみ残す。publish 成功後に best-effort で実行され、日付を解釈できないキーには触れない。
+
 ## GitHub Actions（ステートレス実行）
 
-R2 が正なので、runner は状態を持たなくてよい。`.github/workflows/collect.yml` は「R2 から DB を GET → job → PUT」だけを行う。所要は checkpoint で約15分、公開リポジトリなので Actions の分数は無制限。
-
-設定（repo 側）:
+R2 が正なので、runner は状態を持たなくてよい。`.github/workflows/collect.yml` は
+「R2 から DB を GET → job → PUT」だけを行う。所要は checkpoint で約15分、
+公開リポジトリなので Actions の分数は無制限。
 
 | 種別 | 名前 | 値 |
 |---|---|---|
 | secret | `GATEWAY_TOKEN` | Worker の Bearer トークン（これだけ） |
-| variable | `GATEWAY_BASE` | `https://estama-r2.<acct>.workers.dev`（秘密ではない） |
-
-コマンド:
+| variable | `GATEWAY_BASE` | `https://estama-r2.<account>.workers.dev`（秘密ではない） |
 
 ```bash
 # 手動試走（まずこれだけを数回）
@@ -158,10 +198,12 @@ gh workflow run collect.yml -f job=checkpoint -f mode=primary
 gh workflow run collect.yml -f job=checkpoint -f mode=backup
 ```
 
-- `mode=backup` は先に `runner.py guard --max-age 90` を実行し、VM が90分以内に成功していれば**何もしない**。GitHub の schedule は遅延・欠落があるため、主系を GHA にするのではなく VM の保険として使う
-- `concurrency: estama-db-writer`（`cancel-in-progress: false`）で GHA 内の同時実行を直列化する。VM とは別系統なので、**両方を同時に回さない**こと。やむを得ず併用する場合も、VM 側の checkpoint/ranking は開始前に「remote の heartbeat が自分の最終成功より新しければ pull する」ため、代走分の行を上書きしない
-- 監視は VM のローカル前提をやめ、`status/last_ok.json`（job / finished_at / snapshots / db_bytes）を R2 に置く。`runner.py guard` がこれを読む
-- 検証済み（2026-11-05）: GHA egress から estama.jp は 200・スクレイパ1店で cast 6行・fail 0（`3.42.157.194` / us-west-2）。実 Worker の GET も確認（`estama.db` 15,580,651B gz → 110,915,584B / snapshots 336,734 / pull 5.3s、`status/last_ok.json` 404 は「成功記録なし」として guard が代走）
+- `mode=backup` は先に `runner.py guard --max-age 90` を実行し、VM が90分以内に成功していれば**何もしない**。GitHub の schedule は遅延・欠落があるため（実測: 連続未発火・36分遅延）、主系を GHA にするのではなく VM の保険として使う
+- **`status/last_ok.json` が 404 の間は「成功記録なし → 代走」**。マージ直後、VM が最初の heartbeat を書くまで backup を回さないこと
+- `concurrency: estama-db-writer`（`cancel-in-progress: false`）で GHA 内の同時実行を直列化する。VM とは別系統なので、**両方を同時に回さない**のが前提
+- 監視は VM のローカル前提をやめ、`status/last_ok.json`（job / finished_at / snapshots / db_bytes）を R2 に置く
+- 検証済み（2026-11-05）: GHA egress から estama.jp は 200・スクレイパ1店で cast 6行・fail 0（`3.42.157.194` / us-west-2）。実 Worker の GET も確認（`estama.db` 15,580,651B gz → 110,915,584B / snapshots 336,734 / pull 5.3s）
+- 未検証: schedule の信頼性（デフォルトブランチ登録のため、マージ後に `mode=backup` で24h観測）
 
 `runner.py pull` / `guard` は VM でも使える（`pull` は venv が無ければ実行中の Python を使う）。
 
@@ -175,6 +217,14 @@ for t in tests/test_*.py; do ./venv/bin/python "$t" || break; done
 
 | ファイル | 対象 |
 |---|---|
+| `test_gateway_roundtrip.py` | ステートレス往復（実HTTPフェイク。GET/gzip 検証・pull・heartbeat・guard・401・破損 payload・VM の pre-run pull・publish 競合） |
+| `test_worker_contract.py` | Worker 本体を Node で実行（401・PUT/GET バイト一致・HEAD ETag/MD5・404/204・キー復号） |
+| `test_collect_workflow.py` | collect.yml の不変条件（手動のみ・直列化・secret・pull 順序・timeout）と guard の CLI 契約 |
+| `test_gw_storage.py` | gateway バックエンド（キー→URL・gzip payload・put/size/verify/delete） |
+| `test_retention.py` | DB 保持（設定・cutoff・剪定・VACUUM・daily 履歴の維持・移行 backfill） |
+| `test_archive_retention.py` | アーカイブ保持（直近N日＋週次・未設定なら削除しない） |
+| `test_gh_storage.py` | data ブランチ保存の blob 検証・復元 |
+| `test_runner.py` | ロック・検証・アーカイブ（閉じた営業日）・1コミット publish・publish 失敗の exit 1 |
 | `test_slot_events.py` | 枠パース・イベント重複排除・シフト内外判定・遅延リプレイ拒否 |
 | `test_hazard.py` | 時間帯別 hazard・ベースライン・確率の出し方 |
 | `test_evidence.py` | 根拠表示（口コミ/爆サイ/枠消失/出典・失敗時も alert 不変） |
@@ -182,14 +232,7 @@ for t in tests/test_*.py; do ./venv/bin/python "$t" || break; done
 | `test_monitor.py` | 監視の警告条件 |
 | `test_schema_migration.py` | `user_version` 移行（旧インデックス削除・再構築・クエリ計画） |
 | `test_chrono.py` | 営業日 06:00 境界の真理表・`chrono_key` と SQL の一致 |
-| `test_archive_retention.py` | アーカイブ保持（直近N日＋週次・未設定なら削除しない） |
-| `test_retention.py` | DB 保持（設定・cutoff・剪定・VACUUM・daily 履歴の維持・移行 backfill） |
-| `test_gateway_roundtrip.py` | ステートレス往復（GET/gzip 検証・pull・heartbeat・guard・VM の pre-run pull） |
-| `test_worker_contract.py` | Worker 本体の契約（401・PUT/GET バイト一致・HEAD ETag/MD5・404/204・キー復号） |
-| `test_collect_workflow.py` | collect.yml の不変条件（手動のみ・直列化・secret・pull 順序）と guard の CLI 契約 |
-| `test_gh_storage.py` | data ブランチ保存の blob 検証・復元 |
-| `test_runner.py` | ロック・検証・アーカイブ（閉じた営業日）・1コミット publish・publish 失敗の exit 1 |
-| `test_report_sections.py` | 未実行だった6節（timing / area / shops / ranking / sellout-forecast / print_report）を固定DBで検証 |
+| `test_report_sections.py` | 6節（timing / area / shops / ranking / sellout-forecast / print_report）を固定DBで検証 |
 | `test_cli_wiring.py` | CLI 配線（rollup / report / dashboard / notify / counts / alert の出力と exit code） |
 | `test_report_golden.py` | report / dashboard / notify のゴールデン（`tests/golden/`、時計固定） |
 | `test_parse_golden.py` | 出勤表パースのゴールデン（今日/未来/境界HTML・`tests/golden/parse_schedule.txt`） |
@@ -210,7 +253,8 @@ for t in tests/test_*.py; do ./venv/bin/python "$t" || break; done
 
 ## スコープと今後
 
-- 現在の publish 先は GitHub `data` ブランチ（暫定）。**次ゴールで R2 移行**
+- 完了: DB の publish 先を GitHub `data` ブランチ → **R2 + Worker gateway** に移行。runner はステートレス化の下地（pull / guard / heartbeat）まで実装・検証済み
+- 次: GHA の `schedule` を有効化するか判断（まず `mode=backup` で24h観測）。GHA 主系にする場合は `db_retention` を GHA 側 `storage.json` に入れる（issue #21）
 - スコープ外: LLM 利用、口コミの再取得、過去分のバックフィル、外部への即時通知
 - 爆サイ取得は 1.5〜2.0 秒間隔・429 は Retry-After 尊重・1日500リクエスト上限で、再開可能（カーソルは `bakusai_state`）
 - VM への反映（clone / cron 設定 / 初回実行）は運用者が任意のタイミングで行う
