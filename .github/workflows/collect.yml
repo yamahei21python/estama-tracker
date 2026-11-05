@@ -1,0 +1,99 @@
+name: Collect (stateless runner)
+
+# Runs the runner with no local state: the live DB is downloaded from
+# R2, the job writes it back. Nothing survives between runs, so the VM
+# and this workflow are interchangeable.
+#
+# rollout plan (2026-11-05):
+#   1. manual `workflow_dispatch` with mode=primary a few times, compare
+#      scrape success / duration / upload with the VM
+#   2. once green, either keep the VM as primary and schedule this with
+#      mode=backup (guard: only run when the VM's heartbeat is stale),
+#      or move the schedule here and disable the VM cron
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "job to run"
+        type: choice
+        options: [checkpoint, ranking]
+        default: checkpoint
+      mode:
+        description: "primary = always run; backup = only when the VM is stale"
+        type: choice
+        options: [primary, backup]
+        default: primary
+
+# One writer per DB. Two runners uploading at once would clobber each
+# other's snapshots (last writer wins), so never cancel a run in
+# progress either: it would leave the remote DB behind the local one.
+concurrency:
+  group: estama-db-writer
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      GATEWAY_TOKEN: ${{ secrets.GATEWAY_TOKEN }}
+      GATEWAY_BASE: ${{ vars.GATEWAY_BASE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install runtime dependencies
+        run: python -m pip install --quiet --upgrade pip requests beautifulsoup4
+
+      - name: Write storage.json (gateway backend)
+        run: |
+          python - <<'PY'
+          import json, os
+          base = (os.environ.get("GATEWAY_BASE") or "").strip()
+          if not base.startswith("https://"):
+              raise SystemExit("vars.GATEWAY_BASE is missing (repo variable, e.g. https://estama-r2.<acct>.workers.dev)")
+          if not os.environ.get("GATEWAY_TOKEN"):
+              raise SystemExit("secrets.GATEWAY_TOKEN is missing")
+          with open("storage.json", "w", encoding="utf-8") as fh:
+              json.dump({"backend": "gateway", "gateway_base": base}, fh)
+          print("storage.json: gateway ->", base)
+          PY
+
+      - name: Backup guard (mode=backup)
+        id: guard
+        if: inputs.mode == 'backup'
+        run: |
+          if python runner.py guard --max-age 90; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "VM heartbeat is fresh; this is a no-op run."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "VM heartbeat is stale; taking over."
+          fi
+
+      - name: Pull live DB
+        if: steps.guard.outputs.run != 'false'
+        run: python runner.py pull
+
+      - name: Run ${{ inputs.job }}
+        if: steps.guard.outputs.run != 'false'
+        run: python runner.py '${{ inputs.job }}'
+
+      - name: Report artifact size
+        if: always()
+        run: |
+          ls -l app/estama.db 2>/dev/null || echo "no local DB"
+          python - <<'PY'
+          import gzip, pathlib
+          p = pathlib.Path("app/estama.db")
+          if p.exists():
+              raw = p.stat().st_size
+              gz = len(gzip.compress(p.read_bytes(), mtime=0))
+              print(f"local raw={raw:,} bytes  gz≈{gz:,} bytes ({gz/1048576:.2f} MiB)")
+          PY

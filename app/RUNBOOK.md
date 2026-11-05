@@ -142,3 +142,54 @@ for t in tests/test_*.py; do ./venv/bin/python "$t" || break; done
 | crawl が止まった | 1日500リクエスト上限。翌日同じコマンドで再開（バックフィルはページ単位で保存済み） |
 | publish が失敗した | GitHub では runner が自動で前の blob に戻す（前版が無ければキー削除）。`run_log` は fail になり runner は exit 1 する。DB 自体は VM のワーキングコピーに残るので、次回 job の publish で再送される |
 | 口コミ根拠が出ない | `ESTAMA_REVIEW_DB` のパスと DB の存在を確認（無くても他の根拠は出る） |
+
+---
+
+## 7. GitHub Actions 代走（ステートレス）
+
+R2 が正なので、runner はローカル状態なしで動く。`.github/workflows/collect.yml` が
+「GET → job → PUT」を行う。VM と違い、DB は毎回ダウンロードする。
+
+前提（repo 設定）: secret `GATEWAY_TOKEN` と variable `GATEWAY_BASE`（Worker の URL）。
+どちらも設定されていないと workflow は最初のステップで止まる。
+
+### 試走（切り替え前）
+
+```bash
+gh workflow run collect.yml -f job=checkpoint -f mode=primary
+gh run watch "$(gh run list --workflow=collect.yml --limit 1 --json databaseId -q '.[0].databaseId')"
+```
+
+受け入れ基準（VM 実行と比較）:
+
+| 項目 | 見る場所 | 合格 |
+|---|---|---|
+| 取得 | `scrape_log` の ok/fail 率 | VM と同程度（fail が増えない） |
+| 行数 | `run_log.detail` の `snapshots +N` | 同時刻の VM 実行と同程度 |
+| 所要 | run の duration | 15分前後、50分以内 |
+| アップロード | run 末尾の `local raw=... gz≈...` | VM 実行と同じ桁（定常 60MB 前後） |
+| 冪等 | 2回連続実行 | 2回目も `snapshots +N` が正、DB が壊れない |
+
+Azure からの取得 IP は VM と別なので、1回目で 403 / 0行が続く場合は egress の確認。
+
+### 代走（保険）として使う
+
+```bash
+gh workflow run collect.yml -f job=checkpoint -f mode=backup
+```
+
+`runner.py guard --max-age 90` が `status/last_ok.json` を読み、VM が90分以内に
+成功していれば何もせず終了する。VM が落ちている時だけ動く。
+
+VM が復帰した場合、checkpoint/ranking の冒頭で `_pull_if_remote_newer()` が
+heartbeat と自分の最終成功を比較し、remote が新しければ先に pull する。
+代走分の行が上書きで消えることはない。
+
+### 主系を GHA に移す場合
+
+1. `collect.yml` に schedule を追加（`mode: backup` ではなく `primary`、または guard 付き）
+2. VM の cron を停止（`crontab -e` で checkpoint/ranking の行をコメントアウト）
+3. 24h は `run_log` の欠損と `status/last_ok.json` の更新間隔を監視する
+
+schedule は GitHub 側の遅延・欠落がある（実測: 連続未発火・36分遅延）。
+毎時の穴を作らないため、主系を GHA にするのは schedule の挙動を測ってから。

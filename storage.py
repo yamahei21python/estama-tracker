@@ -15,8 +15,12 @@ to exactly one backend, selected at call time:
   objects are stored under their key (the Worker maps the URL path
   to the R2 key), with .db objects gzip-compressed exactly like the
   GitHub backend - the raw DB (106 MB on 2026-11-05) would exceed the
-  Workers 100 MB request-body limit uncompressed. Auth rides the
-  custom.estama-r2 connector surrogate, so no token sits on this VM.
+  Workers 100 MB request-body limit uncompressed. Auth is a Bearer
+  token: `GATEWAY_TOKEN` in the environment when it is set (GitHub
+  Actions, repo secret), otherwise the custom.estama-r2 connector
+  surrogate fills it on egress so no token sits on this VM.
+  `storage_get` reads objects back (that is what makes the runner
+  stateless); it is not implemented for the GitHub backend.
 - Otherwise a local mirror directory (BASE/r2_local/).
 
 runner.py does the DB-side work (verify, snapshot, upload, archive);
@@ -233,12 +237,28 @@ def _gw_url(key: str) -> str:
     return _gw_base() + "/" + urllib.parse.quote(key, safe="/")
 
 
-def _gw_http(method: str, url: str, data: bytes | None = None,
-             content_type: str | None = None,
-             timeout: int = 180) -> tuple[int, dict, bytes]:
+def _gw_authorize(req: urllib.request.Request, url: str) -> None:
+    """Authorize a gateway request.
+
+    GATEWAY_TOKEN in the environment wins and is sent directly: that is
+    how GitHub Actions runs (repo secret, no connector on the runner).
+    On the VM the variable is unset and the connector surrogate fills
+    the header on egress, so no token sits on disk.
+    """
+    token = os.environ.get("GATEWAY_TOKEN")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+        return
     sys.path.insert(0, GH_CRED_LIB)
     from dynamic_credentials import add_surrogate_to_request
 
+    host = urllib.parse.urlparse(url).hostname
+    add_surrogate_to_request(req, GW_CONNECTOR, allowed_hosts=[host])
+
+
+def _gw_http(method: str, url: str, data: bytes | None = None,
+             content_type: str | None = None,
+             timeout: int = 180) -> tuple[int, dict, bytes]:
     req = urllib.request.Request(url, data=data, method=method)
     # Cloudflare's edge rejects the default Python-urllib User-Agent
     # with 403 (error 1010) before the Worker runs, so send a
@@ -246,8 +266,7 @@ def _gw_http(method: str, url: str, data: bytes | None = None,
     req.add_header("User-Agent", "estama-tracker/1.0")
     if content_type:
         req.add_header("Content-Type", content_type)
-    host = urllib.parse.urlparse(url).hostname
-    add_surrogate_to_request(req, GW_CONNECTOR, allowed_hosts=[host])
+    _gw_authorize(req, url)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, dict(resp.headers), resp.read()
@@ -315,7 +334,58 @@ def _gw_delete(key: str) -> None:
         raise IOError(f"gateway DELETE {key} -> HTTP {status}")
 
 
+def _write_atomic(local_file: Path, data: bytes) -> None:
+    local_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = local_file.with_name(local_file.name + ".part")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, local_file)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _gw_get(key: str, local_file: Path) -> bool:
+    """Download one object; False when the key does not exist.
+
+    .db objects come back gzip-compressed (gw_path adds .gz), so a
+    corrupt body fails here instead of producing an unopenable DB.
+    The file is replaced atomically: a failed download never leaves a
+    half-written DB where a valid one used to be.
+    """
+    status, _, body = _gw_http("GET", _gw_url(gw_path(key)))
+    if status == 404:
+        return False
+    if status != 200:
+        raise IOError(f"gateway GET {key} -> HTTP {status}")
+    if gw_path(key) != key:
+        try:
+            body = gzip.decompress(body)
+        except OSError as exc:
+            raise IOError(
+                f"gateway GET {key}: corrupt gzip payload ({exc})") from exc
+    _write_atomic(local_file, body)
+    return True
+
+
 # ------------------------------------------------------------ dispatch ----
+
+def storage_get(key: str, local_file: Path) -> bool:
+    """Download key into local_file. False when the object is missing.
+
+    Only the gateway (R2 behind the Worker) and the local mirror are
+    supported: the GitHub backend has no token on the VM by design and
+    the R2 branch needs boto3 credentials that the runner never has.
+    """
+    b = backend_name()
+    if b == "gateway":
+        return _gw_get(key, local_file)
+    if b == "local-mirror":
+        src = LOCAL_MIRROR / key
+        if not src.exists():
+            return False
+        _write_atomic(local_file, src.read_bytes())
+        return True
+    raise NotImplementedError(f"storage_get is not implemented for {b}")
 
 def storage_put(key: str, local_file: Path) -> None:
     b = backend_name()

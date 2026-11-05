@@ -31,6 +31,10 @@ Storage backends (write live key + verify; GitHub restores on mismatch):
 Usage:
     runner.py checkpoint    # scrape all shops (today only) + verify + upload
     runner.py ranking       # weekly rankings + watchlist sync + upload
+    runner.py pull          # download the live DB (stateless: GitHub Actions)
+    runner.py guard --max-age 90
+                            # exit 0 when the heartbeat is fresh (VM alive),
+                            # 3 when a backup runner should take over
 """
 
 from __future__ import annotations
@@ -49,6 +53,10 @@ BASE = Path(os.environ.get("ESTAMA_VM_BASE", Path(__file__).resolve().parent))
 APP = BASE / "app"
 DB = APP / "estama.db"
 VENV_PY = BASE / "venv" / "bin" / "python"
+if not VENV_PY.exists():
+    # GitHub Actions / bare checkouts have no venv; use the interpreter
+    # that is running this file.
+    VENV_PY = Path(sys.executable)
 LOCK_FILE = BASE / "runner.lock"
 STATE_FILE = BASE / "archive_state.json"
 LOG_DIR = BASE / "logs"
@@ -61,10 +69,14 @@ from common import business_date, now_jst  # noqa: E402
 from retention import apply_retention, retention_config  # noqa: E402
 from storage import (  # noqa: E402
     backend_name, gh_live_blob, gh_restore, storage_config, storage_delete,
-    storage_exists, storage_list, storage_put, storage_verify,
+    storage_exists, storage_get, storage_list, storage_put, storage_verify,
 )
 
 LIVE_KEY = "estama.db"
+# Small object the schedule/backup logic reads. Written after every
+# successful publish so a stateless runner (GitHub Actions) can tell
+# whether the VM is still doing its job.
+HEARTBEAT_KEY = "status/last_ok.json"
 
 
 def log(msg: str) -> None:
@@ -117,7 +129,120 @@ def snapshot_count(path: Path) -> int:
         con.close()
 
 
+def job_pull() -> str:
+    """Download the live DB (stateless runs: GitHub Actions).
+
+    The stateless runner owns no state: everything it needs is the one
+    R2 object, and the job that follows writes it back. A missing key
+    is an error, not an empty start: an empty DB would be uploaded over
+    the good one.
+
+    The download lands next to the DB, is verified, and only then
+    replaces it. A failed download, a corrupt gzip, or a broken SQLite
+    file leaves the previous DB (and its WAL) untouched.
+    """
+    tmp = DB.with_name(DB.name + ".download")
+    tmp.unlink(missing_ok=True)
+    try:
+        if not storage_get(LIVE_KEY, tmp):
+            raise RuntimeError(f"{LIVE_KEY} not found in {backend_name()}")
+        stats = verify_db(tmp)
+        # The old WAL belongs to the old file; applying it to the new
+        # one would corrupt it. Drop it only once the new DB is proven.
+        for suffix in ("-wal", "-shm"):
+            Path(str(DB) + suffix).unlink(missing_ok=True)
+        os.replace(tmp, DB)
+    finally:
+        tmp.unlink(missing_ok=True)
+    log(f"pull ok: {DB} {DB.stat().st_size} bytes, stats={stats}, "
+        f"backend={backend_name()}")
+    return f"pulled {stats['snapshots']} snapshots"
+
+
+def _as_jst_naive(ts: str | None) -> datetime | None:
+    """Parse a run_log / heartbeat timestamp to naive JST for comparison.
+
+    run_log writes `"%Y-%m-%d %H:%M:%S JST"` and the heartbeat writes
+    ISO with an offset; both have to be comparable.
+    """
+    if not ts:
+        return None
+    ts = ts.strip()
+    if ts.endswith(" JST"):
+        ts = ts[:-4]
+    try:
+        dt = datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(now_jst().tzinfo).replace(tzinfo=None)
+    return dt
+
+
+def local_last_ok() -> str | None:
+    """finished_at of the newest successful local run (None when unknown)."""
+    if not DB.exists():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+        try:
+            return con.execute(
+                "SELECT MAX(finished_at) FROM run_log WHERE status = 'ok'"
+            ).fetchone()[0]
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+
+
+def _pull_if_remote_newer() -> bool:
+    """Adopt the live DB when another runner wrote it more recently.
+
+    The VM is the primary writer, but a GitHub Actions backup can run
+    while it is down. Without this, the VM's stale copy would be
+    uploaded on the next checkpoint (last writer wins) and the backup's
+    observations would vanish. The heartbeat is written after every
+    successful publish, so it is an exact marker of remote recency.
+    """
+    payload = read_heartbeat()
+    remote = _as_jst_naive(payload.get("finished_at"))
+    if remote is None:
+        return False
+    local_raw = local_last_ok()
+    local = _as_jst_naive(local_raw)
+    if local is not None and remote <= local:
+        return False
+    log(f"pre-run: remote DB is newer (heartbeat {payload.get('finished_at')}"
+        f" > local {local_raw}); pulling before the run")
+    job_pull()
+    return True
+
+
 # ---------------------------------------------------------------- upload ----
+
+def _abort_if_another_writer_published() -> None:
+    """Refuse to overwrite a DB another runner published mid-run.
+
+    Two runners can only overlap when the VM and GitHub Actions are
+    both enabled (the workflow's concurrency group is GHA-internal).
+    The heartbeat is written after every publish, so one newer than
+    this run's start means somebody else's rows are on top: uploading
+    would drop them. One lost hour is recoverable; a silent overwrite
+    is not. A read failure is ignored (no evidence of a conflict).
+    """
+    if RUN_STARTED_AT is None:
+        return
+    try:
+        payload = read_heartbeat()
+    except Exception as exc:
+        log(f"upload: heartbeat check skipped ({type(exc).__name__}: {exc})")
+        return
+    ts = _as_jst_naive(payload.get("finished_at"))
+    if ts is not None and ts > RUN_STARTED_AT:
+        raise RuntimeError(
+            "another runner published after this run started "
+            f"({payload.get('finished_at')}); refusing to overwrite its DB")
+
 
 def upload_db() -> dict:
     """Verify -> snapshot -> one direct live write -> verify -> restore.
@@ -129,6 +254,7 @@ def upload_db() -> dict:
     also fails the previous live blob is restored so the branch never
     keeps a corrupt DB.
     """
+    _abort_if_another_writer_published()
     stats = verify_db(DB)
     STAGING_DIR.mkdir(parents=True, exist_ok=True)
     snap = STAGING_DIR / f"estama-{now_jst():%Y%m%d-%H%M%S}.db"
@@ -298,19 +424,28 @@ def run_log_open(job: str) -> int | None:
         return None
 
 
-def run_log_close(run_id: int | None, status: str, detail: str | None = None) -> None:
+def run_log_close(run_id: int | None, status: str, detail: str | None = None) -> str | None:
+    """Finish a run row; returns the finished_at stamp it wrote.
+
+    The heartbeat reuses that exact string, so a runner comparing its
+    own last success against the remote heartbeat sees equality instead
+    of a phantom "remote is newer" a second later.
+    """
+    ts = _run_ts()
     if run_id is None:
-        return
+        return None
     try:
         con = _run_db()
         con.execute(
             "UPDATE run_log SET finished_at = ?, status = ?, detail = ?"
             " WHERE run_id = ?",
-            (_run_ts(), status, detail, run_id))
+            (ts, status, detail, run_id))
         con.commit()
         con.close()
     except Exception as exc:
         log(f"run_log close failed: {exc}")
+        return None
+    return ts
 
 
 def run_log_mark(job: str, status: str, detail: str | None = None) -> None:
@@ -322,6 +457,7 @@ def run_log_mark(job: str, status: str, detail: str | None = None) -> None:
 # ------------------------------------------------------------------ jobs ----
 
 CURRENT_RUN_ID: int | None = None  # run_log id of the active job
+RUN_STARTED_AT: datetime | None = None  # naive JST; set right before the job
 
 
 def run_scraper(args: list[str], timeout: int = 1800) -> None:
@@ -489,7 +625,25 @@ def _db_retention_best_effort() -> None:
             " (rollup missing; will retry)")
 
 
+def _pre_run_pull() -> None:
+    """Adopt a newer remote DB before this run writes anything.
+
+    If the heartbeat cannot be read, stop: silently overwriting a
+    backup run's rows (last writer wins) is worse than skipping one
+    hour, and the scrape could not have been published anyway.
+    """
+    try:
+        _pull_if_remote_newer()
+    except NotImplementedError:
+        return  # backend without downloads
+    except Exception as exc:
+        raise RuntimeError(
+            f"cannot check the remote heartbeat: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
 def job_checkpoint() -> str:
+    _pre_run_pull()
     _archive_best_effort()
     before = snapshot_count(DB)
     run_scraper(["estama_scraper.py", "--all-shops", "--import-db"])
@@ -513,6 +667,80 @@ def job_checkpoint() -> str:
 DASHBOARD = APP / "dashboard.html"
 
 
+def write_heartbeat(job: str, detail: str,
+                    finished_at: str | None = None) -> None:
+    """Record the last successful run as a small R2 object.
+
+    A stateless backup runner cannot inspect the VM, so this object is
+    the handshake: `runner.py guard --max-age N` reads it and decides
+    whether to take over. Snapshot count and DB size are cheap liveness
+    signals that also catch "the job runs but imports nothing".
+
+    `finished_at` is the run_log stamp of the same run. Reusing it
+    verbatim keeps "did another runner publish after me?" answerable
+    with a plain comparison.
+    """
+    payload = {
+        "job": job,
+        "finished_at": finished_at or _run_ts(),
+        "snapshots": snapshot_count(DB),
+        "db_bytes": DB.stat().st_size,
+        "detail": detail,
+    }
+    STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STAGING_DIR / "last_ok.json"
+    tmp.write_text(json.dumps(payload, ensure_ascii=False) + "\n")
+    try:
+        storage_put(HEARTBEAT_KEY, tmp)
+    finally:
+        tmp.unlink(missing_ok=True)
+    log(f"heartbeat ok: {HEARTBEAT_KEY} {payload}")
+
+
+def read_heartbeat() -> dict:
+    """Read status/last_ok.json.
+
+    A missing object is normal (first run, pre-migration) and returns
+    {}. Any other failure propagates: a runner that cannot tell whether
+    another writer is ahead must not decide on its own.
+    """
+    STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = STAGING_DIR / "last_ok.json"
+    try:
+        if not storage_get(HEARTBEAT_KEY, tmp):
+            return {}
+        return json.loads(tmp.read_text())
+    except NotImplementedError:
+        return {}   # backend without downloads: no heartbeat semantics
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def heartbeat_age_min(payload: dict, now: datetime) -> float | None:
+    """Minutes since the recorded success; None when unknown/unparsable."""
+    finished = _as_jst_naive(payload.get("finished_at"))
+    if finished is None:
+        return None
+    if now.tzinfo is not None:
+        now = now.astimezone(now.tzinfo).replace(tzinfo=None)
+    return (now - finished).total_seconds() / 60
+
+
+def job_guard(max_age_min: float) -> int:
+    """Exit 0 when the VM is keeping up (skip), 3 when it is not (run)."""
+    payload = read_heartbeat()
+    age = heartbeat_age_min(payload, now_jst())
+    if age is None:
+        log("guard: no usable heartbeat -> taking over")
+        return 3
+    if age <= max_age_min:
+        log(f"guard: heartbeat {age:.0f} min old "
+            f"(job={payload.get('job')}) -> VM is alive, skip")
+        return 0
+    log(f"guard: heartbeat {age:.0f} min old (> {max_age_min:.0f}) -> take over")
+    return 3
+
+
 def publish() -> None:
     upload_db()
     try:
@@ -529,6 +757,7 @@ def publish() -> None:
 
 
 def job_ranking() -> str:
+    _pre_run_pull()
     _archive_best_effort()
     run_scraper(["ranking_scraper.py", "--area", "all", "--import-db",
                  "--save-json", "--sync-watchlist",
@@ -543,21 +772,47 @@ def job_ranking() -> str:
 
 
 def main() -> int:
-    if len(sys.argv) != 2 or sys.argv[1] not in ("checkpoint", "ranking", "prune"):
+    argv = sys.argv[1:]
+    if not argv or argv[0] not in (
+            "checkpoint", "ranking", "prune", "pull", "guard"):
         print(__doc__)
         return 2
+    job = argv[0]
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     lock_fh = open(LOCK_FILE, "w")
     try:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        log(f"SKIP {sys.argv[1]}: another run holds the lock")
-        run_log_mark(sys.argv[1], "skip", "another run holds the lock")
+        log(f"SKIP {job}: another run holds the lock")
+        run_log_mark(job, "skip", "another run holds the lock")
         return 0
-    job = sys.argv[1]
+    if job == "guard":
+        # Read-only: never opens the DB or writes run_log.
+        max_age = 90.0
+        if "--max-age" in argv:
+            try:
+                max_age = float(argv[argv.index("--max-age") + 1])
+            except (IndexError, ValueError):
+                log("guard: --max-age needs a number")
+                return 2
+        try:
+            return job_guard(max_age)
+        except Exception as exc:
+            log(f"guard failed: {type(exc).__name__}: {exc}")
+            return 3  # unknown state: taking over is the safe choice
+    if job == "pull":
+        # The DB does not exist yet, so run_log has nowhere to go.
+        try:
+            detail = job_pull()
+        except Exception as exc:
+            log(f"FAIL pull: {type(exc).__name__}: {exc}")
+            return 1
+        log(f"DONE pull: {detail}")
+        return 0
     log(f"START {job}")
+    global CURRENT_RUN_ID, RUN_STARTED_AT
+    RUN_STARTED_AT = now_jst().replace(tzinfo=None)
     run_id = run_log_open(job)
-    global CURRENT_RUN_ID
     CURRENT_RUN_ID = run_id
     try:
         detail = {"checkpoint": job_checkpoint, "ranking": job_ranking,
@@ -568,7 +823,7 @@ def main() -> int:
         # no publish: job_checkpoint's 'no new rows' rejection is also an
         # upload guard - a failed job must not replace the shared DB
         return 1
-    run_log_close(run_id, "ok", detail)
+    finished_at = run_log_close(run_id, "ok", detail)
     # publish only AFTER run_log_close and only for jobs that ship
     # artifacts: the distributed DB's newest run row must show the
     # final status, not a stale 'running' (section_runlog flags a
@@ -584,6 +839,12 @@ def main() -> int:
                           f"job ok, publish failed: {type(exc).__name__}: {exc}")
             return 1
         _retention_best_effort()
+        try:
+            write_heartbeat(job, detail, finished_at)
+        except Exception as exc:
+            # Liveness bookkeeping only: the artifact was already
+            # published, so this must not turn a good run red.
+            log(f"heartbeat failed (job ok): {type(exc).__name__}: {exc}")
     log(f"DONE {job}")
     return 0
 
