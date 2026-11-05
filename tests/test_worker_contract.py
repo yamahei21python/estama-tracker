@@ -114,6 +114,33 @@ await call("PUT", "a%20b.json", { body: nested });
 check("percent-encoded key is decoded", store.has("a b.json"));
 check("decoded key reads back", (await call("GET", "a%20b.json")).status === 200);
 
+// --- /__copy -----------------------------------------------------------
+const payload3 = new Uint8Array([5, 1, 9, 2, 8]);
+await call("PUT", "a.json", { body: payload3 });
+res = await call("POST", "__copy", {
+  body: JSON.stringify({ src: "a.json", dst: "b.json" }),
+});
+check("POST /__copy -> 200", res.status === 200);
+check("copied object byte-identical",
+      store.has("b.json") && Buffer.compare(store.get("b.json"), Buffer.from(payload3)) === 0);
+res = await call("POST", "__copy", {
+  body: JSON.stringify({ src: "absent.json", dst: "never.json" }),
+});
+check("/__copy with missing source -> 404", res.status === 404);
+check("no destination written for a failed copy", !store.has("never.json"));
+res = await call("POST", "__copy", { body: "not json{" });
+check("/__copy with bad JSON -> 400", res.status === 400);
+res = await call("POST", "__copy", {
+  body: JSON.stringify({ src: "a.json" }),
+});
+check("/__copy missing a field -> 400", res.status === 400);
+res = await call("POST", "__copy", {
+  body: JSON.stringify({ src: "a.json", dst: "noauth.json" }),
+  auth: "Bearer nope",
+});
+check("/__copy without auth -> 401", res.status === 401);
+check("401 copy wrote nothing", !store.has("noauth.json"));
+
 // --- unsupported method ------------------------------------------------
 check("POST on a key -> 405", (await call("POST", "x.json", { body: new Uint8Array([1]) })).status === 405);
 

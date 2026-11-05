@@ -20,3 +20,6 @@ storage.json
 dashboard.html
 *.log
 .DS_Store
+
+# local agent memory
+.workbuddy-ai/

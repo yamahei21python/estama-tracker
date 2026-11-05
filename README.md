@@ -124,11 +124,11 @@ Worker の契約（`cloudflare/gateway-worker.js`）:
 | `GET` | `/<key>` | オブジェクトを返す（無ければ 404） |
 | `HEAD` | `/<key>` | `X-Object-Size` + ETag（オブジェクト MD5） |
 | `DELETE` | `/<key>` | 削除（冪等、無くても 204） |
-| `POST` | `/__copy` | `{"src","dst"}` のサーバ側コピー |
+| `POST` | `/__copy` | `{"src","dst"}` のサーバ側コピー（公開前のバックアップ取得とロールバックに使用） |
 
 - **認証は Bearer のみ**。`GATEWAY_TOKEN` が環境変数にあれば直送（GitHub Actions）、無ければ `custom.estama-r2` connector が egress 時に付与（VM。トークンをディスクに置かない）。未設定の Worker は fail-closed で 401
 - **`.db` は gzip で送る**（`estama.db.gz`）。生の 110MB は Workers のリクエスト上限 100MB を超えるため。実測 2026-11-05: raw 110,915,584B → gz 15,580,651B
-- **検証**: PUT 直後に HEAD の ETag（= 送った payload の MD5）と突き合わせ、不一致なら1回だけ再送する。それでも不一致なら失敗で止まる（gateway には前版へ戻す手段が無い）
+- **検証とロールバック**: PUT 直後に HEAD の ETag（= 送った payload の MD5）と突き合わせ、不一致なら1回だけ再送する。それでも不一致なら `estama.db.prev.gz`（書込み直前のサーバ側 copy）へ戻してサイズ/ETag 一致を確認したうえで失敗にする。`estama.db.prev.gz` は毎回上書き、直前の公開版だけが残る
 - gzip ヘッダの OS バイトは 0x03 に固定（`gz_deterministic`）。固定しないと、Linux が書いたオブジェクトを macOS が再圧縮したときに MD5 だけが変わり、内容は正しいのに検証が落ちる
 - `storage_get` は gateway とローカルミラーのみ対応（GitHub バックエンドはトークンを VM に置かない設計のため対象外）
 
@@ -169,7 +169,8 @@ Worker の受信上限が 100MB（gzip 後）なので、ライブ DB は保持�
 
 publish の安全策:
 
-- 書込み直後に MD5（ETag）を照合し、不一致なら1回だけ再送する。それでも一致しなければ **失敗として止まる**（`run_log` は `fail`、exit 1）。GitHub バックエンドのみ前の blob に戻す／前版が無ければキーを削除する。壊れた DB が最新版を潰さない
+- 書込み前にライブオブジェクトをサーバ側で `estama.db.prev.gz` に copy する（gateway）。書込み後に ETag（MD5）を照合し、不一致なら1回だけ再送。それでも一致しなければ **`estama.db.prev.gz` からロールバック**して `fail` で止まる（GitHub は従来どおり前の blob に戻す／前版が無ければキーを削除）。壊れた DB が最新版を潰さない
+- 書込み前後の両方で heartbeat を見て、開始後に他者が公開していたら publish を拒否する。前後判定は `max_run_id`（1つの DB 系列なので単調増加）で行う。時刻比較は旧 heartbeat とフォーク時のフォールバック
 - publish が失敗した実行は `run_log` を `fail` にして runner が exit 1 する（cron 側で気づける）
 - job の冒頭で `status/last_ok.json` を読み、**自分より新しい成功があれば先に pull** してから走る（代走分の行を上書きしない）
 - publish の直前にもう一度 heartbeat を見て、**自分の開始後に他者が公開していたら上書きを拒否**する（1時間の欠落で済む）
