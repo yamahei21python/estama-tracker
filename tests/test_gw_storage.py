@@ -90,7 +90,10 @@ s._gw_http = fake_http
 tmp = Path(tempfile.mkdtemp())
 f = tmp / "x.db"
 f.write_bytes(b"SQLite format 3\0" + b"y" * 5000)
-payload = gzip.compress(f.read_bytes(), mtime=0)
+# The stored payload is the pinned-header form (gz_deterministic):
+# gzip OS byte 0x03 on every platform, so a Mac reader and a Linux
+# writer derive the same MD5 (live 2026-11-05).
+payload = s.gz_deterministic(f.read_bytes())
 
 # direct live-key flow (what upload_db does: put -> verify)
 s.storage_put("estama.db", f)
