@@ -25,3 +25,40 @@ jobs:
             echo "== $t"
             python "$t"
           done
+
+  # TEMPORARY: Azure egress probe for the stateless-runner migration.
+  # One shop, no DB. Removed in the next commit.
+  egress-probe:
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install runtime dependencies
+        run: python -m pip install --quiet --upgrade pip requests beautifulsoup4
+      - name: Public IP / ASN
+        run: |
+          echo "ipify: $(curl -s --max-time 10 https://api.ipify.org)"
+          curl -s --max-time 10 https://ipinfo.io/json || true
+      - name: Direct HTTP to estama.jp
+        run: |
+          UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+          for u in "https://estama.jp/" "https://estama.jp/shop/34532/schedule/"; do
+            curl -sS --max-time 20 -o /tmp/out.html -D /tmp/hdr.txt \
+              -w "URL=%{url_effective} code=%{http_code} bytes=%{size_download} t=%{time_total}s\n" \
+              -A "$UA" "$u" || echo "curl failed: $u"
+            head -12 /tmp/hdr.txt
+          done
+      - name: Scraper one shop (no DB)
+        run: |
+          python app/estama_scraper.py --shop-id 34532 2>&1 | tail -30
+      - name: Scraper three shops (rate-limit sanity)
+        run: |
+          for id in 34532 34533 34534; do
+            echo "== shop $id"
+            python app/estama_scraper.py --shop-id "$id" 2>&1 | tail -4
+            sleep 5
+          done
