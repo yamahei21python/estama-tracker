@@ -74,6 +74,60 @@ def _s3():
 
 # ------------------------------------------------------------- backend ----
 
+def _gw_copy_raw(src_obj: str, dst_obj: str) -> None:
+    """Server-side copy of one stored object (raw object keys).
+
+    Used to snapshot the live object before a publish, so a failed
+    verification can roll it back without a download. R2 copies are
+    atomic, so the copy can't be half-written.
+    """
+    if not src_obj or not dst_obj:
+        raise ValueError("src and dst are required")
+    status, _, body = _gw_http(
+        "POST", _gw_base() + "/__copy",
+        data=json.dumps({"src": src_obj, "dst": dst_obj}).encode(),
+        content_type="application/json",
+        timeout=300,
+    )
+    if status != 200:
+        detail = body.decode("utf-8", "ignore").strip() if body else ""
+        raise IOError(
+            f"gateway copy {src_obj} -> {dst_obj} failed: HTTP {status} {detail}")
+
+
+def storage_copy_verify(src_obj: str, dst_obj: str) -> bool:
+    """True when dst_obj is a byte-identical copy of src_obj.
+
+    Compares size and ETag; both are derived from the stored bytes, so
+    no download is needed. Used to confirm a rollback actually restored
+    the previous live object.
+    """
+    if backend_name() != "gateway":
+        raise NotImplementedError(
+            "storage_copy_verify is only implemented for the gateway backend")
+    src = _gw_head_obj(src_obj)
+    dst = _gw_head_obj(dst_obj)
+    if src is None or dst is None:
+        return False
+    if src[0] is not None and dst[0] is not None and src[0] != dst[0]:
+        return False
+    return bool(src[1]) and src[1] == dst[1]
+
+
+def storage_copy_object(src_obj: str, dst_obj: str) -> None:
+    """Copy a *stored* object under a new object key (gateway only).
+
+    Keys here are the R2 object names, not the logical keys the rest of
+    the storage API takes: for `estama.db` that is `estama.db.gz`.
+    Raises NotImplementedError on other backends (GitHub has its own
+    blob restore path).
+    """
+    if backend_name() != "gateway":
+        raise NotImplementedError(
+            f"storage_copy_object is only implemented for the gateway backend")
+    _gw_copy_raw(src_obj, dst_obj)
+
+
 def storage_config() -> dict:
     if STORAGE_CONFIG.exists():
         return json.loads(STORAGE_CONFIG.read_text())
@@ -306,16 +360,9 @@ def _gw_put(key: str, local_file: Path) -> None:
         raise IOError(f"gateway PUT {key} -> HTTP {status}")
 
 
-def _gw_head(key: str) -> tuple[int | None, str | None] | None:
-    """(size, etag) of the stored object; None when it does not exist.
-
-    The size comes from X-Object-Size: a Content-Length set by the
-    Worker itself is ignored by the Workers runtime, so the gateway
-    returns the size in a custom header (Content-Length is kept only
-    as a fallback). The etag is R2's httpEtag - the object MD5 for
-    non-multipart uploads - stripped of its quotes.
-    """
-    status, headers, _ = _gw_http("HEAD", _gw_url(gw_path(key)))
+def _gw_head_obj(obj: str) -> tuple[int | None, str | None] | None:
+    """HEAD by raw object key (no .db -> .gz mapping)."""
+    status, headers, _ = _gw_http("HEAD", _gw_url(obj))
     if status != 200:
         return None
     h = {k.lower(): v for k, v in headers.items()}
@@ -331,6 +378,18 @@ def _gw_head(key: str) -> tuple[int | None, str | None] | None:
             etag = etag[2:]
         etag = etag.strip('"').lower() or None
     return size, etag
+
+
+def _gw_head(key: str) -> tuple[int | None, str | None] | None:
+    """(size, etag) of the stored object; None when it does not exist.
+
+    The size comes from X-Object-Size: a Content-Length set by the
+    Worker itself is ignored by the Workers runtime, so the gateway
+    returns the size in a custom header (Content-Length is kept only
+    as a fallback). The etag is R2's httpEtag - the object MD5 for
+    non-multipart uploads - stripped of its quotes.
+    """
+    return _gw_head_obj(gw_path(key))
 
 
 def _gw_size(key: str) -> int | None:

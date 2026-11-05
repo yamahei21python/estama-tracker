@@ -126,6 +126,37 @@ class FakeGateway(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def do_POST(self):
+        if not self._auth():
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.path != "/__copy":
+            self.send_response(405)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        n = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(n)
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            self.send_response(400)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        src, dst = payload.get("src"), payload.get("dst")
+        if not src or not dst:
+            self.send_response(400)
+        elif src not in STORE:
+            self.send_response(404)
+        else:
+            STORE[dst] = STORE[src]
+            self.send_response(200)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
 
 srv = ThreadingHTTPServer(("127.0.0.1", 0), FakeGateway)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -290,6 +321,50 @@ os.environ["GATEWAY_TOKEN"] = TOKEN
 check("401 leaves an existing file untouched",
       keep.read_bytes() == b"previous good bytes")
 
+# ------------------------------ server-side rollback copy (/__copy)
+# NOTE: runs before the "runner pull" section, so make the local DB
+# first; the rollback test depends on app/estama.db existing.
+pre_live = STORE.get("estama.db.gz")
+check("live object present before copy test", pre_live is not None)
+storage.storage_copy_object("estama.db.gz", "estama.db.prev.gz")
+check("server-side copy stored under the new key",
+      STORE.get("estama.db.prev.gz") == pre_live)
+check("copy verify passes for an identical object",
+      storage.storage_copy_verify("estama.db.prev.gz", "estama.db.gz") is True)
+try:
+    storage.storage_copy_object("missing.gz", "dst.gz")
+    copy_missing_raised = False
+except IOError:
+    copy_missing_raised = True
+check("missing source raises IOError", copy_missing_raised)
+check("failed copy left no destination object", "dst.gz" not in STORE)
+
+# A failed publish must roll the live object back, without a download.
+# NOTE: runner imported `storage_verify` by name, so patch runner's
+# binding, not storage's.
+original_verify = runner.storage_verify
+runner.storage_verify = lambda *a, **kw: False
+try:
+    # upload_db() runs against the pulled DB, so put a known object
+    # in place and expect it to come back after the rollback.
+    runner.job_pull()                # app/estama.db now holds the src bytes
+    storage.storage_put("estama.db", src)
+    pre_upload = STORE["estama.db.gz"]
+    try:
+        runner.upload_db()
+        rollback_raised = False
+    except IOError:
+        rollback_raised = True
+finally:
+    runner.storage_verify = original_verify
+check("publish fails when verification never passes", rollback_raised)
+check("live object was rolled back to the pre-publish copy",
+      STORE.get("estama.db.gz") == pre_upload)
+check("prev object was refreshed by the publish attempt",
+      "estama.db.prev.gz" in STORE)
+# put the live object back to what the rest of the suite expects
+storage.storage_put("estama.db", src)
+
 # ------------------------------------------------ runner pull
 check("runner falls back when there is no venv", runner.VENV_PY.exists())
 detail = runner.job_pull()
@@ -408,7 +483,72 @@ runner.RUN_STARTED_AT = datetime(2999, 1, 1)
 check("publish proceeds when this run is the newest",
       runner._abort_if_another_writer_published() is None)
 
-# --- a bad download must never replace a good DB --------------------
+# --- heartbeat max_run_id: monotone, clock-independent ----------------
+runner.RUN_STARTED_AT = datetime(2026, 11, 5, 12, 0)
+# A remote DB that is strictly ahead: same lineage, one extra run.
+src3 = SCRATCH / "src3.db"
+shutil.copyfile(pulled, src3)          # the VM-adopted DB (1 ok row)
+con = sqlite3.connect(src3)
+con.execute(
+    """INSERT INTO run_log (job, started_at, finished_at, status)
+       VALUES ('ranking', '2026-11-05 23:20:00',
+               '2026-11-05 23:21:00', 'ok')""")
+con.commit()
+con.close()
+hb_local = runner.local_max_run_id()
+storage.storage_put("estama.db", src3)   # remote now holds the newer id
+fixture = {"job": "ranking", "finished_at": "2000-01-01 00:00:00 JST",
+           "max_run_id": hb_local + 1, "snapshots": 2}
+tmpf = SCRATCH / "hb-ahead.json"
+tmpf.write_text(json.dumps(fixture))
+storage.storage_put(runner.HEARTBEAT_KEY, tmpf)
+check("id-ahead remote pulls despite an ancient stamp",
+      runner._pull_if_remote_newer() is True)
+check("after adopting it, the same heartbeat no longer pulls",
+      runner._pull_if_remote_newer() is False)
+
+# (b) an older remote id with a newer stamp still triggers the pull
+# (fork case: two writers from the same base can hand out the same id)
+fixture = {"job": "checkpoint", "finished_at": "2999-01-01 00:00:00 JST",
+           "max_run_id": runner.local_max_run_id()}
+tmpf.write_text(json.dumps(fixture))
+storage.storage_put(runner.HEARTBEAT_KEY, tmpf)
+check("legacy-style time rule still catches a fork",
+      runner._pull_if_remote_newer() is True)
+
+# (c) publish conflict is rejected by id alone, clock aside
+runner.RUN_STARTED_AT = datetime(2999, 1, 1)  # time rule silent
+fixture = {"job": "checkpoint", "finished_at": "2000-01-01 00:00:00 JST",
+           "max_run_id": runner.local_max_run_id() + 999}
+tmpf.write_text(json.dumps(fixture))
+storage.storage_put(runner.HEARTBEAT_KEY, tmpf)
+try:
+    runner._abort_if_another_writer_published()
+    id_conflict_raised = False
+except RuntimeError:
+    id_conflict_raised = True
+check("publish conflict rejected by id alone", id_conflict_raised)
+runner.RUN_STARTED_AT = datetime(2026, 11, 5, 12, 0)
+
+# (d) legacy heartbeat (no max_run_id) falls back to the time rule
+fixture = {"job": "checkpoint", "finished_at": "2999-01-01 00:00:00 JST"}
+tmpf.write_text(json.dumps(fixture))
+storage.storage_put(runner.HEARTBEAT_KEY, tmpf)
+try:
+    runner._abort_if_another_writer_published()
+    legacy_conflict_raised = False
+except RuntimeError:
+    legacy_conflict_raised = True
+check("heartbeat without max_run_id uses the time rule", legacy_conflict_raised)
+runner.RUN_STARTED_AT = None
+
+# (e) heartbeat round-trips max_run_id
+runner.write_heartbeat("checkpoint", "id marker")
+hb = runner.read_heartbeat()
+check("heartbeat carries max_run_id", isinstance(hb.get("max_run_id"), int))
+check("max_run_id matches the local DB",
+      hb.get("max_run_id") == runner.local_max_run_id())
+runner.write_heartbeat("checkpoint", "restore mine")
 before = pulled.read_bytes()
 STORE["estama.db.gz"] = b"definitely not gzip"
 try:

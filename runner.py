@@ -68,11 +68,17 @@ sys.path.insert(0, str(CODE_DIR / "app"))
 from common import business_date, now_jst  # noqa: E402
 from retention import apply_retention, retention_config  # noqa: E402
 from storage import (  # noqa: E402
-    backend_name, gh_live_blob, gh_restore, storage_config, storage_delete,
-    storage_exists, storage_get, storage_list, storage_put, storage_verify,
+    backend_name, gw_path, gh_live_blob, gh_restore, storage_config,
+    storage_copy_object, storage_copy_verify, storage_delete,
+    storage_exists, storage_get, storage_list, storage_put,
+    storage_verify,
 )
 
 LIVE_KEY = "estama.db"
+# Object key holding the live DB as it was *before* the current publish.
+# Written with a server-side R2 copy, so it can be rolled back without
+# downloading anything. Overwritten on every publish.
+PREV_OBJ = "estama.db.prev.gz"
 # Small object the schedule/backup logic reads. Written after every
 # successful publish so a stateless runner (GitHub Actions) can tell
 # whether the VM is still doing its job.
@@ -195,16 +201,52 @@ def local_last_ok() -> str | None:
         return None
 
 
+def local_max_run_id() -> int:
+    """Newest run_log id in the local DB (0 when unknown).
+
+    The live DB is the shared artifact every writer pulls first, so
+    run ids come from one AUTOINCREMENT sequence and are comparable
+    across hosts. A remote heartbeat with a higher id holds rows this
+    host does not have - no clock involved.
+    """
+    if not DB.exists():
+        return 0
+    try:
+        con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+        try:
+            row = con.execute(
+                "SELECT COALESCE(MAX(run_id), 0) FROM run_log").fetchone()
+            return int(row[0] or 0)
+        finally:
+            con.close()
+    except (sqlite3.Error, TypeError, ValueError):
+        return 0
+
+
 def _pull_if_remote_newer() -> bool:
     """Adopt the live DB when another runner wrote it more recently.
 
     The VM is the primary writer, but a GitHub Actions backup can run
     while it is down. Without this, the VM's stale copy would be
     uploaded on the next checkpoint (last writer wins) and the backup's
-    observations would vanish. The heartbeat is written after every
-    successful publish, so it is an exact marker of remote recency.
+    observations would vanish.
+
+    The comparison is monotone on `max_run_id` (one shared DB lineage);
+    heartbeats without it (pre-migration) fall back to the timestamp.
+    Equal ids with a newer stamp still mean "something else's rows" in
+    the fork case, so the time check runs as well.
     """
     payload = read_heartbeat()
+    local_id = local_max_run_id()
+    try:
+        remote_id = int(payload["max_run_id"]) if payload else None
+    except (KeyError, TypeError, ValueError):
+        remote_id = None
+    if remote_id is not None and remote_id > local_id:
+        log(f"pre-run: remote DB is ahead (run_id {remote_id} > local "
+            f"{local_id}); pulling before the run")
+        job_pull()
+        return True
     remote = _as_jst_naive(payload.get("finished_at"))
     if remote is None:
         return False
@@ -225,9 +267,11 @@ def _abort_if_another_writer_published() -> None:
 
     Two runners can only overlap when the VM and GitHub Actions are
     both enabled (the workflow's concurrency group is GHA-internal).
-    The heartbeat is written after every publish, so one newer than
-    this run's start means somebody else's rows are on top: uploading
-    would drop them. One lost hour is recoverable; a silent overwrite
+    The heartbeat is written after every publish, so a remote DB holding
+    rows this host does not have (run_id) - or a publish newer than this
+    run's start (time; needed for the fork case, where two writers from
+    the same base hand out the same run ids) - means uploading would
+    drop their rows. One lost hour is recoverable; a silent overwrite
     is not. A read failure is ignored (no evidence of a conflict).
     """
     if RUN_STARTED_AT is None:
@@ -237,6 +281,17 @@ def _abort_if_another_writer_published() -> None:
     except Exception as exc:
         log(f"upload: heartbeat check skipped ({type(exc).__name__}: {exc})")
         return
+    try:
+        remote_id = int(payload.get("max_run_id")) if payload else None
+    except (TypeError, ValueError):
+        remote_id = None
+    if remote_id is not None:
+        local_id = local_max_run_id()
+        if remote_id > local_id:
+            raise RuntimeError(
+                "another runner published a newer DB "
+                f"(run_id {remote_id} > local {local_id}); "
+                "refusing to overwrite its rows")
     ts = _as_jst_naive(payload.get("finished_at"))
     if ts is not None and ts > RUN_STARTED_AT:
         raise RuntimeError(
@@ -245,30 +300,42 @@ def _abort_if_another_writer_published() -> None:
 
 
 def upload_db() -> dict:
-    """Verify -> snapshot -> one direct live write -> verify -> restore.
+    """Verify -> snapshot -> one write -> verify -> roll back on failure.
 
-    The DB goes straight to LIVE_KEY as a single data-branch commit.
-    (The old staging -> promote -> delete dance cost three commits per
-    checkpoint.) The written blob is verified against the locally
-    verified snapshot; only a mismatch re-uploads it once, and if that
-    also fails the previous live blob is restored so the branch never
-    keeps a corrupt DB.
+    The DB goes straight to LIVE_KEY as a single object write. The
+    written object is verified against the locally verified snapshot;
+    only a mismatch re-uploads it once. If that also fails the previous
+    live object is restored, so the shared copy never stays corrupt:
+    GitHub via the pre-captured blob SHA, gateway via the server-side
+    copy of `PREV_OBJ` taken just before the write. When the gateway
+    has no previous object (first publish) or the copy failed, there is
+    nothing to roll back to and the failure is reported as-is.
     """
     _abort_if_another_writer_published()
     stats = verify_db(DB)
-    STAGING_DIR.mkdir(parents=True, exist_ok=True)
-    snap = STAGING_DIR / f"estama-{now_jst():%Y%m%d-%H%M%S}.db"
+    staging = STAGING_DIR / f"estama-{now_jst():%Y%m%d-%H%M%S}.db"
     size = 0
+    copied_prev = False
+    if backend_name() == "gateway":
+        try:
+            # Snapshot the current live object *before* overwriting it.
+            storage_copy_object(gw_path(LIVE_KEY), PREV_OBJ)
+            copied_prev = True
+            log(f"upload: live object snapshot -> {PREV_OBJ}")
+        except Exception as exc:
+            # A missing live object (first publish) is the normal case;
+            # anything else just means no rollback for this run.
+            log(f"upload: prev copy skipped ({type(exc).__name__}: {exc})")
     try:
-        snapshot_copy(DB, snap)
-        verify_db(snap)  # the copy itself must be intact before it can go live
-        size = snap.stat().st_size
+        snapshot_copy(DB, staging)
+        verify_db(staging)  # the copy itself must be intact before it can go live
+        size = staging.stat().st_size
         prev_blob = (gh_live_blob(LIVE_KEY)
                      if backend_name() == "github" else None)
-        storage_put(LIVE_KEY, snap)
-        if not storage_verify(LIVE_KEY, snap):
-            storage_put(LIVE_KEY, snap)  # retry once from the good copy
-        if not storage_verify(LIVE_KEY, snap):
+        storage_put(LIVE_KEY, staging)
+        if not storage_verify(LIVE_KEY, staging):
+            storage_put(LIVE_KEY, staging)  # retry once from the good copy
+        if not storage_verify(LIVE_KEY, staging):
             if backend_name() == "github":
                 if prev_blob:
                     gh_restore(LIVE_KEY, prev_blob)
@@ -276,9 +343,18 @@ def upload_db() -> dict:
                 else:
                     storage_delete(LIVE_KEY)
                     log(f"upload: verified live write failed, deleted {LIVE_KEY}")
+            elif backend_name() == "gateway" and copied_prev:
+                try:
+                    storage_copy_object(PREV_OBJ, gw_path(LIVE_KEY))
+                    if storage_copy_verify(PREV_OBJ, gw_path(LIVE_KEY)):
+                        log(f"upload: live object restored from {PREV_OBJ}")
+                    else:
+                        log("upload: rollback copied, but size/ETag do not match")
+                except Exception as exc:
+                    log(f"upload: rollback FAILED ({type(exc).__name__}: {exc})")
             raise IOError("live object verification failed after restore")
     finally:
-        snap.unlink(missing_ok=True)
+        staging.unlink(missing_ok=True)
     log(f"upload ok: {LIVE_KEY} {size} bytes, stats={stats}, backend={backend_name()}")
     return stats
 
@@ -678,11 +754,14 @@ def write_heartbeat(job: str, detail: str,
 
     `finished_at` is the run_log stamp of the same run. Reusing it
     verbatim keeps "did another runner publish after me?" answerable
-    with a plain comparison.
+    with a plain comparison. `max_run_id` is the monotone marker the
+    cross-host comparison uses - the live DB is one AUTOINCREMENT
+    sequence, so it needs no clock.
     """
     payload = {
         "job": job,
         "finished_at": finished_at or _run_ts(),
+        "max_run_id": local_max_run_id(),
         "snapshots": snapshot_count(DB),
         "db_bytes": DB.stat().st_size,
         "detail": detail,
