@@ -39,7 +39,7 @@ runner.py = 巡回・取込・検証・日次アーカイブ・R2 への publish
 | `storage.py` | 保存バックエンド（**R2 gateway**／GitHub data ブランチ／ローカルミラー）。取得・書込み後の検証・復元 |
 | `cloudflare/gateway-worker.js` | R2 を HTTP に落とす Worker。Bearer 認証、PUT/GET/HEAD/DELETE、`POST /__copy` |
 | `.github/workflows/collect.yml` | ステートレス実行（手動 dispatch のみ。`mode` は primary / backup） |
-| `.github/workflows/ci.yml` | テスト（全27ファイル） |
+| `.github/workflows/ci.yml` | テスト（全28ファイル） |
 | `app/estama_scraper.py` | 出勤表の巡回・`snapshots`/`slot_events` への取込・完売スピード分析 |
 | `app/ranking_scraper.py` | 週間人気ランキング（14エリア×30人）取得・`cast_rankings` 保存・ウォッチリスト同期 |
 | `app/estama_tracker.py` | 分析 CLI（report / alert / sold-out / counts / sellout-forecast / monitor / notify / dashboard / cast / status）。解析とディスパッチのみ |
@@ -53,7 +53,7 @@ runner.py = 巡回・取込・検証・日次アーカイブ・R2 への publish
 | `app/schema.sql` | スキーマ（`shops` / `snapshots` / `cast_rankings` / `daily_cast_status` / `run_log` / `scrape_log` / `forecast_eval` / `slot_events` / `cast_watch`） |
 | `app/shops.json` | 巡回対象のウォッチリスト（74店） |
 | `app/deep_shops.json` | deep tier（爆サイでスレッドが確認できた店だけの固定リスト、40店。口コミ順位で埋めない） |
-| `tests/` | テスト（27ファイル、外部通信なし。import に requests / beautifulsoup4 が必要） |
+| `tests/` | テスト（28ファイル、外部通信なし。import に requests / beautifulsoup4 が必要） |
 | `scripts/oneoff/` | 退役した一回限りの分析スクリプト（本体 `app/` からは参照されない） |
 
 DB（`*.db`）と `storage.json`、`banned_shops.json`、`dashboard.html`、`logs/`、`staging/`、`r2_local/` はランタイム成果物のため git 管理外。`bakusai.db` は VM ローカルの別 DB で、R2 にも上げない。`.perch/mcp.json`（ローカルCLI設定・認証情報を含み得る）も管理外。
@@ -134,25 +134,20 @@ Worker の契約（`cloudflare/gateway-worker.js`）:
 
 ## DB 容量（ライブ DB の保持）
 
-Worker の受信上限が 100MB（gzip 後）なので、ライブ DB は保持期間で上限を固定する。`storage.json` の `db_retention` で有効化する（未設定なら削除しない）:
+保持期間の既定値は **repo の [config/policy.json](config/policy.json)** が唯一の出所（single source of truth）。GHA の `storage.json` は生成物なので何も同梱せず、repo を checkout すれば同じ値がそのまま効く。VM の `storage.json` はホスト固有の接続情報のみでよい。ホスト単位で1つの値を上書きしたい場合だけ `storage.json` の `db_retention` に書く（policy のキーを storage 側で上書きする）:
 
 ```json
-"db_retention": {
-  "snapshots_days": 15,
-  "slot_events_days": 30,
-  "daily_days": 365,
-  "rankings_days": 365,
-  "scrape_log_days": 90,
-  "run_log_days": 365
-}
+"db_retention": { "snapshots_days": 3 }   // 3日だけに短縮、残りは policy の既定値のまま
 ```
+
+`config/policy.json` が壊れている／読めない場合は、既定値を全て無効化する（静かに削除が始まらない）。
 
 - 生 `snapshots` は intraday 用なので15日。長期の履歴は `daily_cast_status`（1 cast-day 1行、約96%小さい）が365日保持する
 - `slot_events`（30分枠の遷移）は自己完結なので30日、`scrape_log` は運用監査のみなので90日
 - アーカイブ（R2 の `archive/estama-<営業日>.db`）が raw の正なので、直近のアーカイブが2日以上滞っていると削除しない
 - 生スナップショットは **rollup 済みの日だけ** 削除する。削除できなかった日は `db retention: kept unrolled snapshot days ...` としてログに出て、次回の rollup 成功で解消する
-- 設定値が壊れている場合（例 `"15d"`）はそのテーブルを無効化する（既定値へ丸めない）。削除後は VACUUM する
-- **GHA が生成する `storage.json` には `db_retention` が無い**（VM の値と食い違うと保持期間が壊れるため、意図的に未設定）。GHA を主系にする際に入れる → issue #21
+- 保持期間が壊れている場合（例 `"15d"`）はそのテーブルを無効化する（既定値へ丸めない）。削除後は VACUUM する
+- GHA の `storage.json` は保持ポリシーを同梱しない。剪定の値は `config/policy.json` に一本化済みなので、VM を更新したら GHA も同じ値で剪定する（issue #21 は policy へ移管して解決済み）
 
 日次サマリー・完売ストリーク・予測履歴・新規cast判定・hazard は `daily_cast_status` を読むため、生スナップショットを剪定しても全期間を維持する。
 
@@ -223,6 +218,7 @@ for t in tests/test_*.py; do ./venv/bin/python "$t" || break; done
 | `test_collect_workflow.py` | collect.yml の不変条件（手動のみ・直列化・secret・pull 順序・timeout）と guard の CLI 契約 |
 | `test_gw_storage.py` | gateway バックエンド（キー→URL・gzip payload・put/size/verify/delete） |
 | `test_retention.py` | DB 保持（設定・cutoff・剪定・VACUUM・daily 履歴の維持・移行 backfill） |
+| `test_policy.py` | repo ポリシー（`config/policy.json`）の解決・ホスト上書き・破損時 fail-closed |
 | `test_archive_retention.py` | アーカイブ保持（直近N日＋週次・未設定なら削除しない） |
 | `test_gh_storage.py` | data ブランチ保存の blob 検証・復元 |
 | `test_runner.py` | ロック・検証・アーカイブ（閉じた営業日）・1コミット publish・publish 失敗の exit 1 |

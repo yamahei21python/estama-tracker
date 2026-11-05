@@ -1,0 +1,10 @@
+{
+  "db_retention": {
+    "snapshots_days": 15,
+    "slot_events_days": 30,
+    "daily_days": 365,
+    "rankings_days": 365,
+    "scrape_log_days": 90,
+    "run_log_days": 365
+  }
+}

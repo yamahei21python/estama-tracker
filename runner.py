@@ -46,6 +46,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+from typing import Callable, NamedTuple
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -66,6 +67,7 @@ CODE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(CODE_DIR))
 sys.path.insert(0, str(CODE_DIR / "app"))
 from common import business_date, now_jst  # noqa: E402
+from policy import archive_retention_config, db_retention_config  # noqa: E402
 from retention import apply_retention, retention_config  # noqa: E402
 from storage import (  # noqa: E402
     backend_name, gw_path, gh_live_blob, gh_restore, storage_config,
@@ -440,7 +442,7 @@ def stale_archive_keys(keys: list[str], today, days: int,
 
 
 def prune_archives(now: datetime) -> list[str]:
-    cfg = storage_config().get("archive_retention") or {}
+    cfg = archive_retention_config(storage_config().get("archive_retention"))
     days = cfg.get("days")
     if not days:
         return []  # unset: no deletion
@@ -675,7 +677,8 @@ def _db_retention_best_effort() -> None:
     cfg = None
     today = business_date(now_jst())
     try:
-        cfg = retention_config(storage_config().get("db_retention"))
+        cfg = retention_config(
+            db_retention_config(storage_config().get("db_retention")))
         if not cfg:
             return  # key absent: retention disabled
         last = _last_archived()
@@ -850,10 +853,32 @@ def job_ranking() -> str:
     return f"ranking sync done; {banned}"
 
 
+class Job(NamedTuple):
+    """One operational job.
+
+    publishes: whether the job's output is pushed to the shared store.
+    Checkpoint and ranking publish; prune only edits local state and
+    never writes to the shared DB (its edits travel with the next
+    publish).
+    """
+
+    run: Callable[[], str]
+    publishes: bool
+
+
+# The single place that knows what a job is. main() and the workflow
+# validation both read this table; a job missing from it cannot be run
+# from the CLI at all (which is the intended fail-closed behaviour).
+JOBS: dict[str, Job] = {
+    "checkpoint": Job(job_checkpoint, publishes=True),
+    "ranking": Job(job_ranking, publishes=True),
+    "prune": Job(job_prune, publishes=False),
+}
+
+
 def main() -> int:
     argv = sys.argv[1:]
-    if not argv or argv[0] not in (
-            "checkpoint", "ranking", "prune", "pull", "guard"):
+    if not argv or argv[0] not in (*JOBS, "pull", "guard"):
         print(__doc__)
         return 2
     job = argv[0]
@@ -894,8 +919,7 @@ def main() -> int:
     run_id = run_log_open(job)
     CURRENT_RUN_ID = run_id
     try:
-        detail = {"checkpoint": job_checkpoint, "ranking": job_ranking,
-                  "prune": job_prune}[job]()
+        detail = JOBS[job].run()
     except Exception as exc:  # report, never crash the schedule silently
         log(f"FAIL {job}: {type(exc).__name__}: {exc}")
         run_log_close(run_id, "fail", f"{type(exc).__name__}: {exc}")
@@ -907,7 +931,7 @@ def main() -> int:
     # artifacts: the distributed DB's newest run row must show the
     # final status, not a stale 'running' (section_runlog flags a
     # running row older than 2h as suspected runner death)
-    if job in ("checkpoint", "ranking"):
+    if JOBS[job].publishes:
         try:
             publish()
         except Exception as exc:  # upload failed - the artifact is stale

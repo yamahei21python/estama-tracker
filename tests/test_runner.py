@@ -195,14 +195,16 @@ con.close()
 
 # publish failure after a good job: the run row must say fail (the
 # artifact is stale) and main() must exit non-zero for cron
-orig = (r.job_checkpoint, r.publish, sys.argv)
-r.job_checkpoint = lambda: "snapshots +1"
+orig = (r.JOBS, r.publish, sys.argv)
+# Patch the registry, not the raw function: main() dispatches by JOBS.
+r.JOBS = {**r.JOBS,
+          "checkpoint": r.Job(lambda: "snapshots +1", True)}
 r.publish = lambda: (_ for _ in ()).throw(IOError("boom"))
 sys.argv = ["runner.py", "checkpoint"]
 try:
     rc = r.main()
 finally:
-    r.job_checkpoint, r.publish, sys.argv = orig
+    r.JOBS, r.publish, sys.argv = orig
 con = sqlite3.connect(db)
 st = con.execute("SELECT status, detail FROM run_log"
                  " ORDER BY run_id DESC LIMIT 1").fetchone()
