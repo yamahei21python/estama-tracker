@@ -111,6 +111,43 @@ gzip済みblobはgitのdelta圧縮がほぼ効かないため、履歴は**約12
 
 順序の根拠: 段2が「次のゴール（本番DB・デプロイ同期）」そのもの。段4は最後でよい。
 
+### 8.1 DB 容量（2026-11-05 実測にもとづく決定）
+
+R2 移行で「data ブランチの履歴増加」は解消したが、代わりに **Worker の受信上限 100MB（gzip 後）** が新しい天井になった。ライブ DB 単体で調査が完結する前提を保ったまま、上限を保持期間で固定する。
+
+実測（本番 DB 129,474,560B / gz 21,052,649B、`~/tmp/estama-analyze` の複製）:
+
+| 対象 | 効果 | 根拠 |
+|---|---|---|
+| VACUUM のみ | 21.05 → 20.96MB gz（−0.5%） | 断片化解消。単独では効かない |
+| 冗長 index 2本の削除 | −5.86MB gz | `idx_snapshots_castid_date` / `idx_snapshots_status_date` は既存 index と重複。`EXPLAIN QUERY PLAN` で代替が効くことを確認 |
+| **合計（VACUUM 後）** | **14,947,830B（−29.0%）** | migration 5.46s + VACUUM 4.4s、integrity ok、envelope 15,930/15,930 充填 |
+
+テーブル別の増加率: `snapshots` 1.28MB/日、`slot_events` 0.42MB/日、aux 合計 0.107MB/日。これを元に保持期間を決定:
+
+| テーブル | 保持 | 定常サイズ | 判断 |
+|---|---|---|---|
+| `snapshots` | 15日 | 19.2MB | intraday 用。30日は +19MB で、`daily_cast_status` が既に時単位の完売時刻を持つため効果が薄い |
+| `slot_events` | 30日 | 12.4MB | 自己完結テーブルなので独立設定 |
+| `daily_cast_status` | 365日 | 18.6MB | 長期履歴の本体（1 cast-day 1行、snapshots の約96%小） |
+| `cast_rankings` | 365日 | 7.1MB | 週次 |
+| `scrape_log` | 90日 | 3.3MB | 運用監査のみ |
+| `run_log` | 365日 | 0.1MB | |
+| **合計** | | **≈60.4MB** | 100MB の60%。snapshots 30日だと 79.6MB |
+
+設計上の決定:
+
+- **daily が長期履歴の正**: `daily_cast_status` に観測包絡線 `first_seen_at` / `last_seen_at` を追加し、`rollup_daily` が書く。日次サマリー・完売ストリーク・予測履歴・新規cast判定・hazard は daily を先に読み、無い日だけ snapshots にフォールバックする。hazard は daily 経路と snapshot 経路で events/at_risk が完全一致（3,730 events / 285,340 at-risk）を実測確認。
+- **15日の理由**: `transfer_days=14` の境界日を含めるため。cutoff = today − (days−1)。14日だと1日不足する。
+- **削除はアーカイブ成功が前提**: `runner._db_retention_best_effort` は `archive_state.json` の `last_archived` が2日以上滞っていると削除しない。失敗時も削除しない（best-effort で job は継続）。
+- **生スナップショットは rollup 済みの日だけ削除**: `DELETE ... AND target_date IN (SELECT target_date FROM daily_cast_status)`。rollup 未実行・途中失敗時に「その日の唯一のコピー」を消さない。削除できなかった日はログに出て、次回の rollup 成功で自動的に解消する（checkpoint は毎回 `rollup` を先に実行する）。
+- **設定ミスは fail-closed**: `db_retention` の値が壊れている（例 `"15d"`）場合はそのテーブルを無効化する。既定値へ丸めて意図せず削除を始めない。
+- **削除後は VACUUM**: freelist 200ページ以上 or 削除あり。129MB で1.1〜4.4秒。
+- **`user_version = 2`**: index 削除＋daily 列追加＋snapshots からの backfill を冪等に実行。
+- **`archive_retention` は未着手のまま**: R2 側の `storage_list` 実装が前提。今回はライブ DB のみ。
+
+検証: `tests/test_retention.py`（29チェック）＋ `tests/test_schema_migration.py` を v2 に更新。5日windowを強制した複製で report が11日分を表示し、新規cast 162人（正解）・hazard n=13,026 を維持することを確認。golden `report.txt` の差分は `GROUP_CONCAT` の順序1行のみ（再生成済み）。
+
 ## 9. 前提条件・リスク
 
 - **移動前キャラクタリゼーション（段4の条件）**: 未実行の6セクション（timing/area/shops/ranking/sellout_forecast/print_report）について、fixture DB で全セクションを実行しキー行と exit code を assert するスモークを先に追加する。これなしの分割は「動いているか不明なコードの引っ越し」。

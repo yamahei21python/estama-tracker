@@ -112,6 +112,31 @@ publish は1実行1コミット。書込み直後に blob SHA を照合し、不
 
 保持ポリシーは `storage.json` の `{"archive_retention": {"days": 30, "weekly": true}}` で有効化する（未設定なら削除しない）。直近30日は日次で残し、それ以前は月曜分のみ残す。publish 成功後に best-effort で実行され、日付を解釈できないキーには触れない。
 
+## DB 容量（ライブ DB の保持）
+
+Worker の受信上限が 100MB（gzip 後）なので、ライブ DB は保持期間で上限を固定する。`storage.json` の `db_retention` で有効化する（未設定なら削除しない）:
+
+```json
+"db_retention": {
+  "snapshots_days": 15,
+  "slot_events_days": 30,
+  "daily_days": 365,
+  "rankings_days": 365,
+  "scrape_log_days": 90,
+  "run_log_days": 365
+}
+```
+
+- 生 `snapshots` は intraday 用なので15日。長期の履歴は `daily_cast_status`（1 cast-day 1行、約96%小さい）が365日保持する
+- `slot_events`（30分枠の遷移）は自己完結なので30日
+- `scrape_log` は運用監査のみなので90日
+- 定常は約60MB（100MBの60%）。アーカイブ（R2）が raw の正なので、`_db_retention_best_effort` は直近のアーカイブが2日以上滞っていると削除しない
+- 生スナップショットは **rollup 済みの日だけ** 削除する（rollup 未実行なら残す）。削除できなかった日は `db retention: kept unrolled snapshot days ...` としてログに出て、次回の rollup 成功で解消する
+- 設定値が壊れている場合（例 `"15d"`）はそのテーブルを無効化する（既定値へ丸めない）
+- 併せて、重複していた `idx_snapshots_castid_date` / `idx_snapshots_status_date` を廃止（gzip で約6MB削減）し、削除後は VACUUM する
+
+日次サマリー・完売ストリーク・予測履歴・新規cast判定・hazard は `daily_cast_status` を読むため、生スナップショットを剪定しても全期間を維持する。
+
 ## テスト
 
 外部通信なし（`requests` / `beautifulsoup4` のインストールは必要）。main への push と PR では GitHub Actions（`.github/workflows/ci.yml`）が同じスイートを実行する。
@@ -130,6 +155,7 @@ for t in tests/test_*.py; do ./venv/bin/python "$t" || break; done
 | `test_schema_migration.py` | `user_version` 移行（旧インデックス削除・再構築・クエリ計画） |
 | `test_chrono.py` | 営業日 06:00 境界の真理表・`chrono_key` と SQL の一致 |
 | `test_archive_retention.py` | アーカイブ保持（直近N日＋週次・未設定なら削除しない） |
+| `test_retention.py` | DB 保持（設定・cutoff・剪定・VACUUM・daily 履歴の維持・移行 backfill） |
 | `test_gh_storage.py` | data ブランチ保存の blob 検証・復元 |
 | `test_runner.py` | ロック・検証・アーカイブ（閉じた営業日）・1コミット publish・publish 失敗の exit 1 |
 | `test_report_sections.py` | 未実行だった6節（timing / area / shops / ranking / sellout-forecast / print_report）を固定DBで検証 |

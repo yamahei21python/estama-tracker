@@ -15,6 +15,10 @@ Wraps the scrapers with the operational safeguards agreed 2026-10-26:
    business date - 1), not on MAX(target_date). When the site flips before
    the last checkpoint of the day, a MAX-based check would never archive the
    finished day. `archive/estama-<closed-date>.db` is written once.
+4. Bounded DB retention: after the import, rows past their window
+   (storage.json `db_retention`) are deleted and the file is VACUUMed, so
+   the gzipped upload stays far below the Worker's 100MB body limit.
+   Skipped when archiving has stalled: the archive is the raw record.
 
 Storage backends (write live key + verify; GitHub restores on mismatch):
 - GitHub: when BASE/storage.json says {"backend": "github", ...}, objects are
@@ -54,6 +58,7 @@ CODE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(CODE_DIR))
 sys.path.insert(0, str(CODE_DIR / "app"))
 from common import business_date, now_jst  # noqa: E402
+from retention import apply_retention, retention_config  # noqa: E402
 from storage import (  # noqa: E402
     backend_name, gh_live_blob, gh_restore, storage_config, storage_delete,
     storage_exists, storage_list, storage_put, storage_verify,
@@ -436,6 +441,54 @@ def _archive_best_effort() -> None:
         log(f"archive failed (job continues): {type(exc).__name__}: {exc}")
 
 
+def _last_archived() -> str | None:
+    if not STATE_FILE.exists():
+        return None
+    try:
+        return json.loads(STATE_FILE.read_text()).get("last_archived")
+    except (ValueError, OSError):
+        return None
+
+
+def _db_retention_best_effort() -> None:
+    """Delete rows past their retention window, then VACUUM.
+
+    Runs after the archive step and after the import, so a removed day
+    already exists as `archive/estama-<date>.db`. Refuses to delete when
+    archiving has stalled (no recent last_archived): the archive is the
+    raw record, and silently dropping unarchived days would be
+    unrecoverable. Best effort: a retention failure must not block the
+    upload of a good scrape.
+    """
+    cfg = None
+    today = business_date(now_jst())
+    try:
+        cfg = retention_config(storage_config().get("db_retention"))
+        if not cfg:
+            return  # key absent: retention disabled
+        last = _last_archived()
+        if not last:
+            log("db retention: skipped (no archive recorded yet)")
+            return
+        lag = (datetime.fromisoformat(today).date()
+               - datetime.fromisoformat(last).date()).days
+        if lag > 2:
+            log(f"db retention: skipped (last archive {last}, {lag}d behind)")
+            return
+        result = apply_retention(DB, cfg, today)
+    except Exception as exc:
+        # Config/state problems must never fail a checkpoint: the rows
+        # simply stay until the next run.
+        log(f"db retention failed (job continues): {type(exc).__name__}: {exc}")
+        return
+    removed = {k: v for k, v in result["deleted"].items() if v}
+    log(f"db retention: rows={result['rows']} "
+        f"vacuum={'yes' if result['vacuumed'] else 'no'} {removed}")
+    if result["unrolled"]:
+        log(f"db retention: kept unrolled snapshot days {result['unrolled']}"
+            " (rollup missing; will retry)")
+
+
 def job_checkpoint() -> str:
     _archive_best_effort()
     before = snapshot_count(DB)
@@ -445,6 +498,10 @@ def job_checkpoint() -> str:
     log(f"checkpoint: snapshots {before} -> {after} (+{after - before})")
     if after <= before:
         raise RuntimeError("checkpoint imported no new rows - refusing to upload")
+    # Shrink before publish so the uploaded object (and the archive of
+    # tomorrow) carry the bounded DB. The archive of the closed day has
+    # already been written above.
+    _db_retention_best_effort()
     return f"snapshots +{after - before} ({before} -> {after})"
 
 
