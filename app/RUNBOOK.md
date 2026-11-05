@@ -170,7 +170,11 @@ gh run watch "$(gh run list --workflow=collect.yml --limit 1 --json databaseId -
 | アップロード | run 末尾の `local raw=... gz≈...` | VM 実行と同じ桁（定常 60MB 前後） |
 | 冪等 | 2回連続実行 | 2回目も `snapshots +N` が正、DB が壊れない |
 
-Azure からの取得 IP は VM と別なので、1回目で 403 / 0行が続く場合は egress の確認。
+GHA の egress は 2026-11-05 に実測済み（`3.42.157.194` / us-west-2）:
+`https://estama.jp/` 200 / 2.0s、`/shop/34532/schedule/` 200 / 1.0s、
+スクレイパ1店で cast 6行・fail 0、5秒間隔の連続アクセスでもブロックなし。
+410 は存在しない shop id への正常応答（自宅 IP でも同じ）。403 / 0行が続く場合のみ
+UA か IP ブロックを疑う。
 
 ### 代走（保険）として使う
 
