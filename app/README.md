@@ -144,6 +144,7 @@ python3 tests/test_schema_migration.py # user_version 移行・索引・クエ�
 python3 tests/test_chrono.py          # 営業日06:00境界・chrono_keyとSQLの一致
 python3 tests/test_gh_storage.py      # data ブランチ保存の blob 検証・復元
 python3 tests/test_archive_retention.py  # アーカイブ保持（30日＋週次）
+python3 tests/test_retention.py       # DB 保持（剪定・VACUUM・daily 履歴の維持）
 python3 tests/test_normalize.py       # ステータス正規化の真理表
 python3 tests/test_report_sections.py # 未実行だった6節（timing/area/shops/ranking/forecast/print_report）
 python3 tests/test_cli_wiring.py      # CLI 配線（rollup/report/dashboard/notify/counts/alert）
