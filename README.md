@@ -137,6 +137,34 @@ Worker の受信上限が 100MB（gzip 後）なので、ライブ DB は保持�
 
 日次サマリー・完売ストリーク・予測履歴・新規cast判定・hazard は `daily_cast_status` を読むため、生スナップショットを剪定しても全期間を維持する。
 
+## GitHub Actions（ステートレス実行）
+
+R2 が正なので、runner は状態を持たなくてよい。`.github/workflows/collect.yml` は「R2 から DB を GET → job → PUT」だけを行う。所要は checkpoint で約15分、公開リポジトリなので Actions の分数は無制限。
+
+設定（repo 側）:
+
+| 種別 | 名前 | 値 |
+|---|---|---|
+| secret | `GATEWAY_TOKEN` | Worker の Bearer トークン（これだけ） |
+| variable | `GATEWAY_BASE` | `https://estama-r2.<acct>.workers.dev`（秘密ではない） |
+
+コマンド:
+
+```bash
+# 手動試走（まずこれだけを数回）
+gh workflow run collect.yml -f job=checkpoint -f mode=primary
+
+# VM が死んでいる時だけ代走する保険
+gh workflow run collect.yml -f job=checkpoint -f mode=backup
+```
+
+- `mode=backup` は先に `runner.py guard --max-age 90` を実行し、VM が90分以内に成功していれば**何もしない**。GitHub の schedule は遅延・欠落があるため、主系を GHA にするのではなく VM の保険として使う
+- `concurrency: estama-db-writer`（`cancel-in-progress: false`）で GHA 内の同時実行を直列化する。VM とは別系統なので、**両方を同時に回さない**こと。やむを得ず併用する場合も、VM 側の checkpoint/ranking は開始前に「remote の heartbeat が自分の最終成功より新しければ pull する」ため、代走分の行を上書きしない
+- 監視は VM のローカル前提をやめ、`status/last_ok.json`（job / finished_at / snapshots / db_bytes）を R2 に置く。`runner.py guard` がこれを読む
+- 移行前に確認すること: Azure からの取得が estama.jp に通るか（`scrape_log` の ok/fail 率・店別行数を VM と比較）、1回の所要が `timeout-minutes: 50` に収まるか、アップロード後の gz サイズが VM 実行と同等か
+
+`runner.py pull` / `guard` は VM でも使える（`pull` は venv が無ければ実行中の Python を使う）。
+
 ## テスト
 
 外部通信なし（`requests` / `beautifulsoup4` のインストールは必要）。main への push と PR では GitHub Actions（`.github/workflows/ci.yml`）が同じスイートを実行する。
@@ -156,6 +184,9 @@ for t in tests/test_*.py; do ./venv/bin/python "$t" || break; done
 | `test_chrono.py` | 営業日 06:00 境界の真理表・`chrono_key` と SQL の一致 |
 | `test_archive_retention.py` | アーカイブ保持（直近N日＋週次・未設定なら削除しない） |
 | `test_retention.py` | DB 保持（設定・cutoff・剪定・VACUUM・daily 履歴の維持・移行 backfill） |
+| `test_gateway_roundtrip.py` | ステートレス往復（GET/gzip 検証・pull・heartbeat・guard・VM の pre-run pull） |
+| `test_worker_contract.py` | Worker 本体の契約（401・PUT/GET バイト一致・HEAD ETag/MD5・404/204・キー復号） |
+| `test_collect_workflow.py` | collect.yml の不変条件（手動のみ・直列化・secret・pull 順序）と guard の CLI 契約 |
 | `test_gh_storage.py` | data ブランチ保存の blob 検証・復元 |
 | `test_runner.py` | ロック・検証・アーカイブ（閉じた営業日）・1コミット publish・publish 失敗の exit 1 |
 | `test_report_sections.py` | 未実行だった6節（timing / area / shops / ranking / sellout-forecast / print_report）を固定DBで検証 |
