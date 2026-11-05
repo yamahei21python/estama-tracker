@@ -161,7 +161,7 @@ gh workflow run collect.yml -f job=checkpoint -f mode=backup
 - `mode=backup` は先に `runner.py guard --max-age 90` を実行し、VM が90分以内に成功していれば**何もしない**。GitHub の schedule は遅延・欠落があるため、主系を GHA にするのではなく VM の保険として使う
 - `concurrency: estama-db-writer`（`cancel-in-progress: false`）で GHA 内の同時実行を直列化する。VM とは別系統なので、**両方を同時に回さない**こと。やむを得ず併用する場合も、VM 側の checkpoint/ranking は開始前に「remote の heartbeat が自分の最終成功より新しければ pull する」ため、代走分の行を上書きしない
 - 監視は VM のローカル前提をやめ、`status/last_ok.json`（job / finished_at / snapshots / db_bytes）を R2 に置く。`runner.py guard` がこれを読む
-- 移行前に確認すること: Azure からの取得が estama.jp に通るか（`scrape_log` の ok/fail 率・店別行数を VM と比較）、1回の所要が `timeout-minutes: 50` に収まるか、アップロード後の gz サイズが VM 実行と同等か
+- 検証済み（2026-11-05）: GHA egress から estama.jp は 200・スクレイパ1店で cast 6行・fail 0（`3.42.157.194` / us-west-2）。実 Worker の GET も確認（`estama.db` 15,580,651B gz → 110,915,584B / snapshots 336,734 / pull 5.3s、`status/last_ok.json` 404 は「成功記録なし」として guard が代走）
 
 `runner.py pull` / `guard` は VM でも使える（`pull` は venv が無ければ実行中の Python を使う）。
 
