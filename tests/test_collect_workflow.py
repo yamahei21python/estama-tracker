@@ -152,6 +152,18 @@ check("guard with no heartbeat -> exit 3 (take over)",
 check("guard with a bad --max-age -> exit 2",
       run_main(["guard", "--max-age"]) == 2)
 
+# ---------------------------------------------------- job registry
+check("JOBS holds exactly checkpoint/ranking/prune",
+      set(runner.JOBS) == {"checkpoint", "ranking", "prune"})
+check("checkpoint and ranking publish",
+      runner.JOBS["checkpoint"].publishes and runner.JOBS["ranking"].publishes)
+check("prune never publishes", runner.JOBS["prune"].publishes is False)
+workflow_options = re.findall(r"options:\s*\[(.*?)\]", text)
+check("workflow exposes exactly the publishing jobs",
+      workflow_options
+      and {s.strip() for s in workflow_options[0].split(",")}
+      == {"checkpoint", "ranking"})
+
 print("\nRESULT:", "ALL PASS" if not fails else f"FAILURES: {fails}")
 shutil.rmtree(SCRATCH, ignore_errors=True)
 sys.exit(1 if fails else 0)

@@ -145,6 +145,7 @@ python3 tests/test_chrono.py          # 営業日06:00境界・chrono_keyとSQL�
 python3 tests/test_gh_storage.py      # data ブランチ保存の blob 検証・復元
 python3 tests/test_archive_retention.py  # アーカイブ保持（30日＋週次）
 python3 tests/test_retention.py       # DB 保持（剪定・VACUUM・daily 履歴の維持）
+python3 tests/test_policy.py          # config/policy.json（単一出所・上書き・fail-closed）
 python3 tests/test_gateway_roundtrip.py # ステートレス往復（pull/heartbeat/guard/pre-run pull）
 python3 tests/test_worker_contract.py  # Worker 本体の契約（401/PUT-GET 一致/HEAD ETag）
 python3 tests/test_collect_workflow.py # collect.yml の不変条件と guard の CLI 契約

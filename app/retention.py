@@ -26,16 +26,19 @@ Safety rules (the caller is responsible for the first two):
   malformed value disables the table: an empty or broken config prunes
   nothing.
 
-Config lives in storage.json:
+Config (checked at run time, never cached across hosts):
 
-    "db_retention": {
+    config/policy.json   repo-wide defaults (single source of truth)
+    storage.json         "db_retention" overrides one or more keys per host
+
+    {
       "snapshots_days": 15,
       "slot_events_days": 30,
       "daily_days": 365,
       "rankings_days": 365,
       "scrape_log_days": 90,
       "run_log_days": 365
-    }
+    };
 """
 from __future__ import annotations
 
