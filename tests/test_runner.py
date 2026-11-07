@@ -25,9 +25,13 @@ JST = ZoneInfo("Asia/Tokyo")
 (SCRATCH / "app").mkdir(parents=True)
 os.environ["ESTAMA_VM_BASE"] = str(SCRATCH)
 
+sys.path.insert(0, str(ROOT))
 spec = importlib.util.spec_from_file_location("runner", ROOT / "runner.py")
 r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
+
+import runtrack.env as rt_env  # noqa: E402
+import runtrack.archive as rt_arc  # noqa: E402
 
 # tiny DB: 2 shops, 3 snapshot rows on business date 2026-10-26
 db = SCRATCH / "app" / "estama.db"
@@ -83,13 +87,18 @@ for d in ("2026-10-26", "2026-10-27"):
         (d,))
 con.commit()
 con.close()
-orig_db, orig_state = r.DB, r.STATE_FILE
-r.DB = flip_db
-r.STATE_FILE = SCRATCH / "archive_state_flip.json"
+orig_db, orig_state = rt_env.DB, rt_env.STATE_FILE
+rt_env.DB = flip_db
+rt_env.STATE_FILE = SCRATCH / "archive_state_flip.json"
+# archive モジュールは import 時に binding されるので直接 patch
+orig_arc_db, orig_arc_state = rt_arc.DB, rt_arc.STATE_FILE
+rt_arc.DB = flip_db
+rt_arc.STATE_FILE = SCRATCH / "archive_state_flip.json"
 try:
     key_flip = r.maybe_archive(now)
 finally:
-    r.DB, r.STATE_FILE = orig_db, orig_state
+    rt_env.DB, rt_env.STATE_FILE = orig_db, orig_state
+    rt_arc.DB, rt_arc.STATE_FILE = orig_arc_db, orig_arc_state
 check("archive keys on closed date even after a site flip",
       key_flip == "archive/estama-2026-10-26.db")
 check("archive records the closed date in state", json.loads(
@@ -109,22 +118,23 @@ con.close()
 
 # upload_db: a failed post-write verification retries once, then
 # restores the previous live blob so the branch never keeps a bad DB.
+import runtrack.storage_ops as sto  # noqa: E402
 puts, restores = [], []
-orig = (r.backend_name, r.storage_put, r.storage_verify,
-        r.gh_live_blob, r.gh_restore)
-r.backend_name = lambda: "github"
-r.storage_put = lambda key, f: puts.append(key)
-r.storage_verify = lambda key, f: False
-r.gh_live_blob = lambda key: "prevsha"
-r.gh_restore = lambda key, sha: restores.append((key, sha))
+orig = (sto.backend_name, sto.storage_put, sto.storage_verify,
+        sto.gh_live_blob, sto.gh_restore)
+sto.backend_name = lambda: "github"
+sto.storage_put = lambda key, f: puts.append(key)
+sto.storage_verify = lambda key, f: False
+sto.gh_live_blob = lambda key: "prevsha"
+sto.gh_restore = lambda key, sha: restores.append((key, sha))
 try:
     r.upload_db()
     check("upload raises when verification keeps failing", False)
 except IOError:
     check("upload raises when verification keeps failing", True)
 finally:
-    (r.backend_name, r.storage_put, r.storage_verify,
-     r.gh_live_blob, r.gh_restore) = orig
+    (sto.backend_name, sto.storage_put, sto.storage_verify,
+     sto.gh_live_blob, sto.gh_restore) = orig
 check("failed verification retries the upload once",
       puts == ["estama.db", "estama.db"])
 check("failed verification restores the previous live blob",
@@ -133,22 +143,22 @@ check("failed verification restores the previous live blob",
 # no previous blob (first publish ever): the bad live key is deleted so
 # the next run does not mistake an unverifiable object for a good one
 deletes = []
-orig = (r.backend_name, r.storage_put, r.storage_verify,
-        r.gh_live_blob, r.gh_restore, r.storage_delete)
-r.backend_name = lambda: "github"
-r.storage_put = lambda key, f: None
-r.storage_verify = lambda key, f: False
-r.gh_live_blob = lambda key: None
-r.gh_restore = lambda key, sha: None
-r.storage_delete = lambda key: deletes.append(key)
+orig = (sto.backend_name, sto.storage_put, sto.storage_verify,
+        sto.gh_live_blob, sto.gh_restore, sto.storage_delete)
+sto.backend_name = lambda: "github"
+sto.storage_put = lambda key, f: None
+sto.storage_verify = lambda key, f: False
+sto.gh_live_blob = lambda key: None
+sto.gh_restore = lambda key, sha: None
+sto.storage_delete = lambda key: deletes.append(key)
 try:
     r.upload_db()
     check("upload raises (no previous blob)", False)
 except IOError:
     check("upload raises (no previous blob)", True)
 finally:
-    (r.backend_name, r.storage_put, r.storage_verify,
-     r.gh_live_blob, r.gh_restore, r.storage_delete) = orig
+    (sto.backend_name, sto.storage_put, sto.storage_verify,
+     sto.gh_live_blob, sto.gh_restore, sto.storage_delete) = orig
 check("failed verification with no previous blob deletes the live key",
       deletes == ["estama.db"])
 
