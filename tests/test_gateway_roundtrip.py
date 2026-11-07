@@ -424,7 +424,7 @@ con.execute(
 con.commit()
 con.close()
 storage.storage_put("estama.db", src2)
-runner.write_heartbeat("checkpoint", "backup run")
+runner.write_heartbeat("checkpoint", "backup run", "2026-11-05 11:00:00 JST")
 check("stale local DB has no successful run yet",
       runner.local_last_ok() is None)
 check("VM pulls when the remote is newer",
