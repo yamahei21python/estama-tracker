@@ -21,13 +21,7 @@ import estama_tracker as t  # noqa: E402
 
 JST = ZoneInfo("Asia/Tokyo")
 SCHEMA = (ROOT / "app" / "schema.sql").read_text()
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 def fresh(name):

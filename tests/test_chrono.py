@@ -24,13 +24,7 @@ import common  # noqa: E402
 import estama_tracker as t  # noqa: E402
 
 JST = ZoneInfo("Asia/Tokyo")
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 def at(y, mo, d, h, mi=0):

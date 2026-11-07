@@ -44,13 +44,7 @@ con.commit()
 con.close()
 (SCRATCH / "app" / "shops.json").write_text('{"shops": []}')
 
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 stats = r.verify_db(db)

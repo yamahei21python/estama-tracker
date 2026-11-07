@@ -26,13 +26,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "collect.yml"
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 text = WORKFLOW.read_text(encoding="utf-8")

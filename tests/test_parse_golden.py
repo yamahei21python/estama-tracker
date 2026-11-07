@@ -145,7 +145,7 @@ if update or not GOLDEN.exists():
     GOLDEN.write_text(actual, encoding="utf-8")
     state = "updated" if update else "created"
 
-fails = []
+from harness import check, fails  # noqa: E402
 if state:
     print(f"{state}: {GOLDEN.relative_to(ROOT)}")
 else:

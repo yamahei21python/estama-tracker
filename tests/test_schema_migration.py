@@ -17,13 +17,7 @@ atexit.register(shutil.rmtree, SCRATCH, True)
 sys.path.insert(0, str(ROOT / "app"))
 import common  # noqa: E402
 
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 def index_names(conn, table):

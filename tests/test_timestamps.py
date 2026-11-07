@@ -59,3 +59,36 @@ for f in ("estama_scraper.py", "ranking_scraper.py", "estama_tracker.py",
           naive_now_calls(ROOT / "app" / f) == [])
 
 print(f"ALL {passed} PASSED")
+
+
+# --- parse_timestamp/stamp (the single source for JST parsing) --------
+import sys as _sys  # noqa: E402
+from pathlib import Path as _P  # noqa: E402
+
+_sys.path.insert(0, str(_P(__file__).resolve().parent.parent))
+
+import common  # noqa: E402
+import runner  # noqa: E402
+
+check("run_log stamp parses back to the same wall clock",
+      common.parse_timestamp(runner._run_ts()).replace(tzinfo=None) is not None)
+check("JST-suffixed stamp round-trips",
+      common.parse_timestamp("2026-11-05 23:05:00 JST")
+      == __import__("datetime").datetime(2026, 11, 5, 23, 5))
+check("ISO with offset converts to JST",
+      common.parse_timestamp("2026-11-05T14:05:00+00:00")
+      == __import__("datetime").datetime(2026, 11, 5, 23, 5))
+check("ISO with JST offset is the same instant",
+      common.parse_timestamp("2026-11-05T23:05:00+09:00")
+      == __import__("datetime").datetime(2026, 11, 5, 23, 5))
+check("naive values are taken as JST",
+      common.parse_timestamp("2026-11-05T00:00:00")
+      == __import__("datetime").datetime(2026, 11, 5, 0, 0))
+check("garbage parses to None",
+      common.parse_timestamp("not a date") is None
+      and common.parse_timestamp(None) is None)
+check("stamp() carries the JST suffix",
+      common.stamp().endswith(" JST") and runner._run_ts().endswith(" JST"))
+check("runner's shim delegates to the common parser",
+      runner._as_jst_naive("2026-11-05 00:00:00 JST")
+      == common.parse_timestamp("2026-11-05 00:00:00 JST"))

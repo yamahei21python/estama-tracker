@@ -66,7 +66,7 @@ STAGING_DIR = BASE / "staging"
 CODE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(CODE_DIR))
 sys.path.insert(0, str(CODE_DIR / "app"))
-from common import business_date, now_jst  # noqa: E402
+from common import business_date, now_jst, parse_timestamp, stamp  # noqa: E402
 from policy import archive_retention_config, db_retention_config  # noqa: E402
 from retention import apply_retention, retention_config  # noqa: E402
 from storage import (  # noqa: E402
@@ -168,23 +168,8 @@ def job_pull() -> str:
 
 
 def _as_jst_naive(ts: str | None) -> datetime | None:
-    """Parse a run_log / heartbeat timestamp to naive JST for comparison.
-
-    run_log writes `"%Y-%m-%d %H:%M:%S JST"` and the heartbeat writes
-    ISO with an offset; both have to be comparable.
-    """
-    if not ts:
-        return None
-    ts = ts.strip()
-    if ts.endswith(" JST"):
-        ts = ts[:-4]
-    try:
-        dt = datetime.fromisoformat(ts)
-    except ValueError:
-        return None
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(now_jst().tzinfo).replace(tzinfo=None)
-    return dt
+    """Parse a run_log / heartbeat timestamp to naive JST for comparison."""
+    return parse_timestamp(ts)
 
 
 def local_last_ok() -> str | None:
@@ -478,7 +463,7 @@ def _retention_best_effort() -> None:
 # are best-effort: a run_log failure must never break a job.
 
 def _run_ts() -> str:
-    return now_jst().strftime("%Y-%m-%d %H:%M:%S") + " JST"
+    return stamp()
 
 
 def _run_db() -> sqlite3.Connection:
@@ -554,10 +539,21 @@ def run_scraper(args: list[str], timeout: int = 1800) -> None:
         [str(VENV_PY), *args],
         cwd=APP, capture_output=True, text=True, timeout=timeout, env=env,
     )
-    tail = (proc.stdout + proc.stderr).strip().splitlines()[-3:]
-    for line in tail:
+    combined = (proc.stdout + "\n" + proc.stderr).strip()
+    # Full scraper output goes to a log file: the cron only sees the
+    # runner's summary, so without this a failed hour is undebuggable.
+    outfile = LOG_DIR / f"scraper-{now_jst():%Y%m%d-%H%M%S-%f}.log"
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        outfile.write_text(combined + "\n", encoding="utf-8")
+        log(f"  scraper output -> {outfile}")
+    except OSError as exc:
+        log(f"  scraper output could not be saved ({exc})")
+    ok = proc.returncode == 0
+    tail_size = 3 if ok else 40
+    for line in combined.splitlines()[-tail_size:]:
         log(f"  scraper: {line}")
-    if proc.returncode != 0:
+    if not ok:
         raise RuntimeError(f"scraper exited {proc.returncode}")
 
 

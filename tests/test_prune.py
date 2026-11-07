@@ -53,13 +53,7 @@ con.close()
 shops = {"shops": [{"shop_id": s, "name": f"shop{s}"} for s in (90001, 90002, 90003, 90004)]}
 (SCRATCH / "app" / "shops.json").write_text(json.dumps(shops))
 
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 cands = r.prune_candidates(db, "2026-10-20")

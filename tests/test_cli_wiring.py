@@ -33,13 +33,7 @@ import estama_tracker as t  # noqa: E402
 D3 = _fixture.DATES[-1]
 DB = str(_fixture.build(SCRATCH / "estama.db"))
 
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 def run(argv):

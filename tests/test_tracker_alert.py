@@ -30,13 +30,7 @@ def add(conn, cast, date, time, norm):
     )
 
 
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 # 1. three checkpoints on ONE day must not count as 3 days

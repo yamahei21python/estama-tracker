@@ -20,13 +20,7 @@ sys.path.insert(0, str(ROOT / "app"))
 import bakusai as b  # noqa: E402
 import evidence  # noqa: E402
 
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 # ------------------------------------------------------------- fixtures --

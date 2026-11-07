@@ -13,13 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 from common import normalize_status_text  # noqa: E402
 from estama_scraper import EstamaScraper  # noqa: E402
 
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 text_cases = [
