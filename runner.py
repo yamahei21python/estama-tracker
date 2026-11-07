@@ -65,15 +65,23 @@ def _as_jst_naive(ts):
     return parse_timestamp(ts)
 
 
-def _pull_if_remote_newer():
+def _sync_run_started_at():
+    # Shim trap: the module global stays None until main() sets it, so an
+    # unconditional copy would erase a value set directly on
+    # runtrack.state (the runtrack-native way, e.g. by tests).
     import runtrack.state as state
-    state.RUN_STARTED_AT = globals().get('RUN_STARTED_AT')
+    started = globals().get('RUN_STARTED_AT')
+    if started is not None:
+        state.RUN_STARTED_AT = started
+
+
+def _pull_if_remote_newer():
+    _sync_run_started_at()
     return storage_ops._pull_if_remote_newer()
 
 
 def _abort_if_another_writer_published():
-    import runtrack.state as state
-    state.RUN_STARTED_AT = globals().get('RUN_STARTED_AT')
+    _sync_run_started_at()
     return storage_ops._abort_if_another_writer_published()
 
 
