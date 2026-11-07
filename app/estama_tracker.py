@@ -15,8 +15,10 @@ Design (see README.md):
   and are NEVER used to decide sold_out.
 
 Stage-4 layout: R3/query helpers live in queries.py, alert/rollup
-logic in analysis.py, all report sections + dashboard/notify in
-report_sections.py. This module keeps the CLI, the snapshot loader and
+logic in analysis.py. The report family lives in the `app/report/`
+package (core / forecast / health / notify / dashboard / _util);
+report_sections.py is a compatibility shim re-exporting the public
+surface. This module keeps the CLI, the snapshot loader and
 the report renderer, and re-exports the analysis names so
 `import estama_tracker as t` keeps working (tests and scripts).
 
