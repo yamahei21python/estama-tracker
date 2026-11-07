@@ -446,8 +446,16 @@ def prune_archives(now: datetime) -> list[str]:
     days = cfg.get("days")
     if not days:
         return []  # unset: no deletion
+    try:
+        keys = storage_list("archive/")
+    except NotImplementedError as exc:
+        # The gateway has no LIST endpoint: pruning cannot enumerate
+        # keys there. Never swallow this into a silent no-op.
+        log(f"archive retention: cannot list keys ({exc}); "
+            f"no archive was deleted")
+        return []
     stale = stale_archive_keys(
-        storage_list("archive/"), now.date(), int(days),
+        keys, now.date(), int(days),
         bool(cfg.get("weekly", True)))
     for key in stale:
         storage_delete(key)
