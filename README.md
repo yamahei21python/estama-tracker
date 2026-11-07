@@ -35,7 +35,8 @@ runner.py = 巡回・取込・検証・日次アーカイブ・R2 への publish
 
 | パス | 役割 |
 |---|---|
-| `runner.py` | 運用ランナー。ロック・DB検証・pull/guard・アーカイブ・publish・heartbeat・`run_log` |
+| `runner.py` | 運用ランナーのエントリポイント。`runtrack/` パッケージを呼ぶ薄いシム（テストの monkeypatch 境界を維持） |
+| `runtrack/` | ランナーの実装（env・state・db・logs・storage_ops・heartbeat・archive・ban・jobs・guard・scraper） |
 | `storage.py` | 保存バックエンド（**R2 gateway**／GitHub data ブランチ／ローカルミラー）。取得・書込み後の検証・復元 |
 | `cloudflare/gateway-worker.js` | R2 を HTTP に落とす Worker。Bearer 認証、PUT/GET/HEAD/DELETE、`POST /__copy` |
 | `.github/workflows/collect.yml` | ステートレス実行（手動 dispatch のみ。`mode` は primary / backup） |

@@ -334,10 +334,10 @@ check("missing source raises IOError", copy_missing_raised)
 check("failed copy left no destination object", "dst.gz" not in STORE)
 
 # A failed publish must roll the live object back, without a download.
-# NOTE: runner imported `storage_verify` by name, so patch runner's
-# binding, not storage's.
-original_verify = runner.storage_verify
-runner.storage_verify = lambda *a, **kw: False
+# Patch the implementation module, which runner delegates to.
+import runtrack.storage_ops as sto  # noqa: E402
+original_verify = sto.storage_verify
+sto.storage_verify = lambda *a, **kw: False
 try:
     # upload_db() runs against the pulled DB, so put a known object
     # in place and expect it to come back after the rollback.
@@ -350,7 +350,7 @@ try:
     except IOError:
         rollback_raised = True
 finally:
-    runner.storage_verify = original_verify
+    sto.storage_verify = original_verify
 check("publish fails when verification never passes", rollback_raised)
 check("live object was rolled back to the pre-publish copy",
       STORE.get("estama.db.gz") == pre_upload)
