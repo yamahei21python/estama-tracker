@@ -116,6 +116,18 @@ DB_PATH = BASE_DIR / "estama.db"
 SCHEMA_PATH = BASE_DIR / "schema.sql"
 SHOPS_JSON_PATH = BASE_DIR / "shops.json"
 
+# ANSI colors shared by CLI modules (estama_scraper / ranking_scraper)
+COLOR_RED = "\033[91m"
+COLOR_GREEN = "\033[92m"
+COLOR_YELLOW = "\033[93m"
+COLOR_CYAN = "\033[96m"
+COLOR_MAGENTA = "\033[95m"
+COLOR_BOLD = "\033[1m"
+COLOR_DIM = "\033[2m"
+COLOR_RESET = "\033[0m"
+
+DEFAULT_SHOP_ID = 40900  # 梅田高級メンズエステ SUPER AKUMA GIRLS
+
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
