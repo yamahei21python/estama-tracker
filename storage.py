@@ -20,7 +20,15 @@ to exactly one backend, selected at call time:
   Actions, repo secret), otherwise the custom.estama-r2 connector
   surrogate fills it on egress so no token sits on this VM.
   `storage_get` reads objects back (that is what makes the runner
-  stateless); it is not implemented for the GitHub backend.
+  stateless); it is not implemented for the GitHub backend. The gateway
+  has no LIST endpoint, so listing (archive retention) is unavailable
+  there: `storage_list` raises NotImplementedError instead of
+  pretending an empty bucket.
+
+All access goes through `Backend` classes; the module-level
+`storage_*` functions are thin facades that select one per call via
+`get_backend()`. `Backend.supports_get` announces the download leg
+without the caller having to catch exceptions.
 - Otherwise a local mirror directory (BASE/r2_local/).
 
 runner.py does the DB-side work (verify, snapshot, upload, archive);
@@ -102,16 +110,15 @@ def storage_copy_verify(src_obj: str, dst_obj: str) -> bool:
     no download is needed. Used to confirm a rollback actually restored
     the previous live object.
     """
-    if backend_name() != "gateway":
+    return _gateway_backend("storage_copy_verify").copy_verify(src_obj, dst_obj)
+
+
+def _gateway_backend(what: str) -> GatewayBackend:
+    backend = get_backend()
+    if not isinstance(backend, GatewayBackend):
         raise NotImplementedError(
-            "storage_copy_verify is only implemented for the gateway backend")
-    src = _gw_head_obj(src_obj)
-    dst = _gw_head_obj(dst_obj)
-    if src is None or dst is None:
-        return False
-    if src[0] is not None and dst[0] is not None and src[0] != dst[0]:
-        return False
-    return bool(src[1]) and src[1] == dst[1]
+            f"{what} is only implemented for the gateway backend")
+    return backend
 
 
 def storage_copy_object(src_obj: str, dst_obj: str) -> None:
@@ -122,10 +129,7 @@ def storage_copy_object(src_obj: str, dst_obj: str) -> None:
     Raises NotImplementedError on other backends (GitHub has its own
     blob restore path).
     """
-    if backend_name() != "gateway":
-        raise NotImplementedError(
-            f"storage_copy_object is only implemented for the gateway backend")
-    _gw_copy_raw(src_obj, dst_obj)
+    _gateway_backend("storage_copy_object").copy_object(src_obj, dst_obj)
 
 
 def storage_config() -> dict:
@@ -135,13 +139,7 @@ def storage_config() -> dict:
 
 
 def backend_name() -> str:
-    if storage_config().get("backend") == "github":
-        return "github"
-    if storage_config().get("backend") == "gateway":
-        return "gateway"
-    if r2_configured():
-        return "R2"
-    return "local-mirror"
+    return get_backend().name
 
 
 # ------------------------------------------------------- GitHub backend ----
@@ -486,67 +484,228 @@ def storage_get(key: str, local_file: Path) -> bool:
         return True
     raise NotImplementedError(f"storage_get is not implemented for {b}")
 
-def storage_put(key: str, local_file: Path) -> None:
-    b = backend_name()
-    if b == "github":
+# ------------------------------------------------------------ backends ----
+#
+# Each backend owns exactly one storage operation set. The module-level
+# storage_* functions are thin facades for callers (and for the test
+# suite, which patches module-level helpers). A backend announces its
+# capabilities (`supports_get`), so callers can ask instead of catching
+# NotImplementedError and hoping.
+
+class Backend:
+    name = ""
+    supports_get = False
+
+    def put(self, key: str, local_file: Path) -> None:
+        raise NotImplementedError
+
+    def get(self, key: str, local_file: Path) -> bool:
+        raise NotImplementedError(
+            f"{self.name}: no download path")
+
+    def size(self, key: str) -> int | None:
+        raise NotImplementedError
+
+    def verify(self, key: str, local_file: Path) -> bool:
+        raise NotImplementedError
+
+    def delete(self, key: str) -> None:
+        raise NotImplementedError
+
+    def list(self, prefix: str = "") -> list[str]:
+        raise NotImplementedError
+
+    def exists(self, key: str) -> bool:
+        return self.size(key) is not None
+
+
+class GitHubBackend(Backend):
+    name = "github"
+    supports_get = False
+
+    def put(self, key: str, local_file: Path) -> None:
         _gh_put(key, local_file)
-    elif b == "gateway":
-        _gw_put(key, local_file)
-    elif b == "R2":
-        _s3().upload_file(str(local_file), os.environ["ESTAMA_R2_BUCKET"], key)
-    else:
-        dest = LOCAL_MIRROR / key
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(local_file, dest)
 
-
-def storage_size(key: str) -> int | None:
-    b = backend_name()
-    if b == "github":
+    def size(self, key: str) -> int | None:
         try:
             return _gh_size(key)
         except Exception:
             return None
-    if b == "gateway":
+
+    def verify(self, key: str, local_file: Path) -> bool:
+        try:
+            return _gh_verify(key, local_file)
+        except Exception:
+            return False
+
+    def delete(self, key: str) -> None:
+        _gh_delete(key)
+
+    def list(self, prefix: str = "") -> list[str]:
+        return sorted(k for k in _gh_entries() if k.startswith(prefix))
+
+    def get(self, key: str, local_file: Path) -> bool:
+        raise NotImplementedError(
+            "github: no download path (the VM holds no token by design)")
+
+
+class GatewayBackend(Backend):
+    name = "gateway"
+    supports_get = True
+
+    def put(self, key: str, local_file: Path) -> None:
+        _gw_put(key, local_file)
+
+    def get(self, key: str, local_file: Path) -> bool:
+        return _gw_get(key, local_file)
+
+    def size(self, key: str) -> int | None:
         try:
             return _gw_size(key)
         except Exception:
             return None
-    if b == "R2":
+
+    def verify(self, key: str, local_file: Path) -> bool:
+        try:
+            return _gw_verify(key, local_file)
+        except Exception:
+            return False
+
+    def delete(self, key: str) -> None:
+        _gw_delete(key)
+
+    def list(self, prefix: str = "") -> list[str]:
+        # The Worker deliberately has no LIST endpoint: it stays a
+        # PUT/GET/HEAD/DELETE/POST(__copy) surface with one token.
+        # Archive retention therefore cannot enumerate keys here and
+        # would silently no-op; callers must see a loud error instead.
+        raise NotImplementedError(
+            "gateway: no LIST endpoint; archive retention is unavailable here")
+
+    # publication safeguards -----
+    def copy_object(self, src_obj: str, dst_obj: str) -> None:
+        _gw_copy_raw(src_obj, dst_obj)
+
+    def copy_verify(self, src_obj: str, dst_obj: str) -> bool:
+        src = _gw_head_obj(src_obj)
+        dst = _gw_head_obj(dst_obj)
+        if src is None or dst is None:
+            return False
+        if src[0] is not None and dst[0] is not None and src[0] != dst[0]:
+            return False
+        return bool(src[1]) and src[1] == dst[1]
+
+
+class R2Backend(Backend):
+    name = "R2"
+    supports_get = False
+
+    def put(self, key: str, local_file: Path) -> None:
+        _s3().upload_file(str(local_file), os.environ["ESTAMA_R2_BUCKET"], key)
+
+    def size(self, key: str) -> int | None:
         try:
             head = _s3().head_object(Bucket=os.environ["ESTAMA_R2_BUCKET"], Key=key)
             return int(head["ContentLength"])
         except Exception:
             return None
-    p = LOCAL_MIRROR / key
-    return p.stat().st_size if p.exists() else None
+
+    def verify(self, key: str, local_file: Path) -> bool:
+        return self.size(key) == local_file.stat().st_size
+
+    def delete(self, key: str) -> None:
+        _s3().delete_object(Bucket=os.environ["ESTAMA_R2_BUCKET"], Key=key)
+
+    def list(self, prefix: str = "") -> list[str]:
+        keys = []
+        paginator = _s3().get_paginator("list_objects_v2")
+        for page in paginator.paginate(
+                Bucket=os.environ["ESTAMA_R2_BUCKET"], Prefix=prefix):
+            keys.extend(o["Key"] for o in page.get("Contents", []))
+        return sorted(keys)
+
+    def get(self, key: str, local_file: Path) -> bool:
+        raise NotImplementedError("R2 (boto3): no download path implemented")
+
+
+class LocalMirrorBackend(Backend):
+    name = "local-mirror"
+    supports_get = True
+
+    def put(self, key: str, local_file: Path) -> None:
+        dest = LOCAL_MIRROR / key
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(local_file, dest)
+
+    def get(self, key: str, local_file: Path) -> bool:
+        src = LOCAL_MIRROR / key
+        if not src.exists():
+            return False
+        _write_atomic(local_file, src.read_bytes())
+        return True
+
+    def size(self, key: str) -> int | None:
+        p = LOCAL_MIRROR / key
+        return p.stat().st_size if p.exists() else None
+
+    def verify(self, key: str, local_file: Path) -> bool:
+        return self.size(key) == local_file.stat().st_size
+
+    def delete(self, key: str) -> None:
+        (LOCAL_MIRROR / key).unlink(missing_ok=True)
+
+    def list(self, prefix: str = "") -> list[str]:
+        if not LOCAL_MIRROR.exists():
+            return []
+        return sorted(
+            str(p.relative_to(LOCAL_MIRROR)) for p in LOCAL_MIRROR.rglob("*")
+            if p.is_file() and str(p.relative_to(LOCAL_MIRROR)).startswith(prefix)
+        )
+
+
+def get_backend() -> Backend:
+    """Pick a backend for this process. Not cached: the config is read
+    fresh so tests and one-off scripts can retarget storage.json."""
+    cfg = storage_config()
+    if cfg.get("backend") == "github":
+        return GitHubBackend()
+    if cfg.get("backend") == "gateway":
+        return GatewayBackend()
+    if r2_configured():
+        return R2Backend()
+    return LocalMirrorBackend()
+
+
+def storage_supports_get() -> bool:
+    """True when the configured backend can download objects back."""
+    return get_backend().supports_get
+
+
+def storage_put(key: str, local_file: Path) -> None:
+    get_backend().put(key, local_file)
+
+
+def storage_get(key: str, local_file: Path) -> bool:
+    """Download key into local_file. False when the object is missing.
+
+    Only the gateway (R2 behind the Worker) and the local mirror support
+    the download leg: GitHub has no token on the VM by design, and the
+    R2 branch needs boto3 credentials the runner never has.
+    """
+    return get_backend().get(key, local_file)
+
+
+def storage_size(key: str) -> int | None:
+    return get_backend().size(key)
 
 
 def storage_verify(key: str, local_file: Path) -> bool:
     """True when the stored object provably matches the local file."""
-    if backend_name() == "github":
-        try:
-            return _gh_verify(key, local_file)
-        except Exception:
-            return False
-    if backend_name() == "gateway":
-        try:
-            return _gw_verify(key, local_file)
-        except Exception:
-            return False
-    return storage_size(key) == local_file.stat().st_size
+    return get_backend().verify(key, local_file)
 
 
 def storage_delete(key: str) -> None:
-    b = backend_name()
-    if b == "github":
-        _gh_delete(key)
-    elif b == "gateway":
-        _gw_delete(key)
-    elif b == "R2":
-        _s3().delete_object(Bucket=os.environ["ESTAMA_R2_BUCKET"], Key=key)
-    else:
-        (LOCAL_MIRROR / key).unlink(missing_ok=True)
+    get_backend().delete(key)
 
 
 def storage_exists(key: str) -> bool:
@@ -555,19 +714,4 @@ def storage_exists(key: str) -> bool:
 
 def storage_list(prefix: str = "") -> list[str]:
     """Every stored key under prefix, sorted."""
-    b = backend_name()
-    if b == "github":
-        return sorted(k for k in _gh_entries() if k.startswith(prefix))
-    if b == "R2":
-        keys = []
-        paginator = _s3().get_paginator("list_objects_v2")
-        for page in paginator.paginate(
-                Bucket=os.environ["ESTAMA_R2_BUCKET"], Prefix=prefix):
-            keys.extend(o["Key"] for o in page.get("Contents", []))
-        return sorted(keys)
-    if not LOCAL_MIRROR.exists():
-        return []
-    return sorted(
-        str(p.relative_to(LOCAL_MIRROR)) for p in LOCAL_MIRROR.rglob("*")
-        if p.is_file() and str(p.relative_to(LOCAL_MIRROR)).startswith(prefix)
-    )
+    return get_backend().list(prefix)

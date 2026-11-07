@@ -39,7 +39,7 @@ runner.py = 巡回・取込・検証・日次アーカイブ・R2 への publish
 | `storage.py` | 保存バックエンド（**R2 gateway**／GitHub data ブランチ／ローカルミラー）。取得・書込み後の検証・復元 |
 | `cloudflare/gateway-worker.js` | R2 を HTTP に落とす Worker。Bearer 認証、PUT/GET/HEAD/DELETE、`POST /__copy` |
 | `.github/workflows/collect.yml` | ステートレス実行（手動 dispatch のみ。`mode` は primary / backup） |
-| `.github/workflows/ci.yml` | テスト（全28ファイル） |
+| `.github/workflows/ci.yml` | テスト（全29ファイル） |
 | `app/estama_scraper.py` | 出勤表の巡回・`snapshots`/`slot_events` への取込・完売スピード分析 |
 | `app/ranking_scraper.py` | 週間人気ランキング（14エリア×30人）取得・`cast_rankings` 保存・ウォッチリスト同期 |
 | `app/estama_tracker.py` | 分析 CLI（report / alert / sold-out / counts / sellout-forecast / monitor / notify / dashboard / cast / status）。解析とディスパッチのみ |
@@ -53,7 +53,7 @@ runner.py = 巡回・取込・検証・日次アーカイブ・R2 への publish
 | `app/schema.sql` | スキーマ（`shops` / `snapshots` / `cast_rankings` / `daily_cast_status` / `run_log` / `scrape_log` / `forecast_eval` / `slot_events` / `cast_watch`） |
 | `app/shops.json` | 巡回対象のウォッチリスト（74店） |
 | `app/deep_shops.json` | deep tier（爆サイでスレッドが確認できた店だけの固定リスト、40店。口コミ順位で埋めない） |
-| `tests/` | テスト（28ファイル、外部通信なし。import に requests / beautifulsoup4 が必要） |
+| `tests/` | テスト（29ファイル、外部通信なし。import に requests / beautifulsoup4 が必要） |
 | `scripts/oneoff/` | 退役した一回限りの分析スクリプト（本体 `app/` からは参照されない） |
 
 DB（`*.db`）と `storage.json`、`banned_shops.json`、`dashboard.html`、`logs/`、`staging/`、`r2_local/` はランタイム成果物のため git 管理外。`bakusai.db` は VM ローカルの別 DB で、R2 にも上げない。`.perch/mcp.json`（ローカルCLI設定・認証情報を含み得る）も管理外。
