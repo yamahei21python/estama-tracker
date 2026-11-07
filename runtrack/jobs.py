@@ -1,20 +1,20 @@
 """Operational jobs and publication."""
 from __future__ import annotations
-from runtrack.env import APP, DB, DASHBOARD, SHOPS_JSON, log
+from runtrack.env import APP, DB, DASHBOARD, SHOPS_JSON, BANNED_JSON, log
 from storage import storage_put
 from runtrack.db import snapshot_count
 from runtrack.archive import (expected_business_date, maybe_archive,
                               _retention_best_effort, _db_retention_best_effort)
 from runtrack.storage_ops import _pull_if_remote_newer
-
-def _pre_run_pull() -> None:
-    if _pull_if_remote_newer():
-        from runtrack.env import log
-        log("pre-run: pulled remote DB before the run")
 from runtrack.ban import enforce_ban, apply_bans, prune_candidates
 from runtrack.scraper import run_scraper
 from runtrack.storage_ops import upload_db, job_pull as _job_pull
 from common import now_jst
+
+
+def _pre_run_pull() -> None:
+    if _pull_if_remote_newer():
+        log("pre-run: pulled remote DB before the run")
 
 def _archive_best_effort():
     try:
