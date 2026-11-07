@@ -40,7 +40,9 @@ runner.py = 巡回・取込・検証・日次アーカイブ・R2 への publish
 | `cloudflare/gateway-worker.js` | R2 を HTTP に落とす Worker。Bearer 認証、PUT/GET/HEAD/DELETE、`POST /__copy` |
 | `.github/workflows/collect.yml` | ステートレス実行（手動 dispatch のみ。`mode` は primary / backup） |
 | `.github/workflows/ci.yml` | テスト（全30ファイル） |
-| `app/estama_scraper.py` | 出勤表の巡回・`snapshots`/`slot_events` への取込・完売スピード分析 |
+| `app/estama_scraper.py` | 出勤表の巡回・完売スピード分析 CLI（EstamaScraper・取込・エントリポイント） |
+| `app/scrape_parse.py` | 純粋なパーサ（shift 解析・枠判定・イベント重複排除の前段。ネット/DB なし） |
+| `app/scrape_store.py` | DB 書き込み層（`import_into_db`・`record_slot_events`・`show_speed_ranking`） |
 | `app/ranking_scraper.py` | 週間人気ランキング（14エリア×30人）取得・`cast_rankings` 保存・ウォッチリスト同期 |
 | `app/estama_tracker.py` | 分析 CLI（report / alert / sold-out / counts / sellout-forecast / monitor / notify / dashboard / cast / status）。解析とディスパッチのみ |
 | `app/queries.py` | R3 最終状態のSQL・日付/キャストキー解決・店名/エリア参照など、分析側の共通クエリ |
