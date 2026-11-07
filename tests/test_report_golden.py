@@ -36,6 +36,11 @@ import _fixture  # noqa: E402
 import analysis  # noqa: E402
 import estama_tracker as t  # noqa: E402
 import report_sections  # noqa: E402
+import report.core as _rcore  # noqa: E402
+import report.dashboard as _rdash  # noqa: E402
+import report.forecast as _rfc  # noqa: E402
+import report.health as _rhel  # noqa: E402
+import report.notify as _rnot  # noqa: E402
 from common import connect_db  # noqa: E402
 
 D3 = _fixture.DATES[-1]
@@ -45,6 +50,11 @@ NOW = datetime(2026, 10, 27, 12, 0, tzinfo=ZoneInfo("Asia/Tokyo"))
 t.now_jst = lambda: NOW
 analysis.now_jst = lambda: NOW
 report_sections.now_jst = lambda: NOW
+_rcore.now_jst = lambda: NOW
+_rdash.now_jst = lambda: NOW
+_rfc.now_jst = lambda: NOW
+_rhel.now_jst = lambda: NOW
+_rnot.now_jst = lambda: NOW
 
 from harness import check, fails  # noqa: E402
 

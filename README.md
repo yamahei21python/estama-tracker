@@ -47,7 +47,8 @@ runner.py = 巡回・取込・検証・日次アーカイブ・R2 への publish
 | `app/estama_tracker.py` | 分析 CLI（report / alert / sold-out / counts / sellout-forecast / monitor / notify / dashboard / cast / status）。解析とディスパッチのみ |
 | `app/queries.py` | R3 最終状態のSQL・日付/キャストキー解決・店名/エリア参照など、分析側の共通クエリ |
 | `app/analysis.py` | アラート判定（普段完売なのに空き）・根拠行・`daily_cast_status` ロールアップ |
-| `app/report_sections.py` | レポート各節・完売予測・監視・notify・HTML ダッシュボードの生成 |
+| `app/report/` | レポートパッケージ（core=節 / forecast=完売予測 / health=監視 / notify / dashboard / _util） |
+| `app/report_sections.py` | 上記 `report/` への互換シム（`from report_sections import X`） |
 | `app/retention.py` | ライブ DB の保持期間剪定 + VACUUM（rollup/アーカイブを前提に安全側で止まる） |
 | `app/bakusai.py` | 爆サイ.com のスレッド発見・本文取得（専用 DB `bakusai.db`、VMローカル） |
 | `app/evidence.py` | alert の根拠表示（口コミ・爆サイ・枠消失・出典URL。表示専用） |
