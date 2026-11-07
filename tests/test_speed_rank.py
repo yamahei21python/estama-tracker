@@ -19,13 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 from common import connect_db  # noqa: E402
 from estama_scraper import show_speed_ranking  # noqa: E402
 
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 tmp_db = os.path.join(tempfile.mkdtemp(prefix="estama-speed-"), "t.db")

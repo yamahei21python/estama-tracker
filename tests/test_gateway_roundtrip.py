@@ -30,13 +30,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 SCRATCH = Path(tempfile.mkdtemp(prefix="estama-gwrt-test-"))
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 # ------------------------------------------------ fake Worker gateway

@@ -23,13 +23,7 @@ import policy  # noqa: E402
 import retention  # noqa: E402
 
 SCRATCH = Path(tempfile.mkdtemp(prefix="estama-policy-test-"))
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 # ----------------------------------------------- the shipped file

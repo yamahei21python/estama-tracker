@@ -60,6 +60,37 @@ def now_jst() -> datetime:
     return datetime.now(JST)
 
 
+def stamp(dt: datetime | None = None) -> str:
+    """The run_log line stamp: '%Y-%m-%d %H:%M:%S JST'."""
+    return (dt or now_jst()).strftime("%Y-%m-%d %H:%M:%S") + " JST"
+
+
+def parse_timestamp(ts: str | None) -> datetime | None:
+    """Parse a timestamp string to a naive JST datetime.
+
+    Accepted forms:
+      'YYYY-MM-DD HH:MM:SS[ JST]'   (run_log / legacy heartbeat)
+      ISO 8601, offset-aware or not ('2026-11-05T14:30:00+09:00',
+                                   '2026-11-05T05:30:00+00:00')
+
+    Offset-aware values are converted to JST wall time; naive values
+    are taken as JST (project convention). Returns None for anything
+    that does not parse.
+    """
+    if not ts:
+        return None
+    text = str(ts).strip()
+    if text.endswith(" JST"):
+        text = text[:-4]
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(JST).replace(tzinfo=None)
+    return dt
+
+
 def business_date(now: datetime | None = None) -> str:
     """YYYY-MM-DD of the business day `now` belongs to (flip 06:00)."""
     return ((now or now_jst()) - timedelta(hours=BUSINESS_DAY_FLIP_HOUR)

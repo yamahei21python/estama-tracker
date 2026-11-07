@@ -19,13 +19,7 @@ from estama_scraper import (  # noqa: E402
 
 SCHEMA = (Path(__file__).resolve().parent.parent / "app" / "schema.sql").read_text()
 
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 def fresh():

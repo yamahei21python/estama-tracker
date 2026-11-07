@@ -34,13 +34,7 @@ from common import connect_db  # noqa: E402
 
 D0, D1, D2, D3 = _fixture.DATES
 
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 def line_with(lines, needle):

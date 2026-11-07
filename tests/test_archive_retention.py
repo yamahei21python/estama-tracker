@@ -25,13 +25,7 @@ r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
 
 JST = ZoneInfo("Asia/Tokyo")
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 # ------------------------------------------------- pure selection logic

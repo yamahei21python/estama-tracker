@@ -30,13 +30,7 @@ from queries import _daily_dates, _all_dates  # noqa: E402
 from report_sections import section_daily, section_new_casts  # noqa: E402
 
 SCRATCH = Path(tempfile.mkdtemp(prefix="estama-retention-test-"))
-fails = []
-
-
-def check(name, cond):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
+from harness import check, fails  # noqa: E402
 
 
 def fresh(path):

@@ -85,15 +85,7 @@ class FakeSession:
         return FakeResp(self.text)
 
 
-fails = []
-
-
-def check(name, cond, detail=""):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
-        if detail:
-            print("   ", detail)
+from harness import check, fails  # noqa: E402
 
 
 scraper = r.RankingScraper.__new__(r.RankingScraper)

@@ -46,15 +46,7 @@ t.now_jst = lambda: NOW
 analysis.now_jst = lambda: NOW
 report_sections.now_jst = lambda: NOW
 
-fails = []
-
-
-def check(name, cond, detail=""):
-    print(("PASS" if cond else "FAIL"), name)
-    if not cond:
-        fails.append(name)
-        if detail:
-            print(detail)
+from harness import check, fails  # noqa: E402
 
 
 conn = connect_db(_fixture.build(SCRATCH / "estama.db"))
